@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>SafeHer — AI Guardian for Women's Safety</title>
 <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}" />
-<meta name="theme-color" content="#667eea" />
+<meta name="theme-color" content="#8b5cf6" />
 <link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -37,11 +37,35 @@
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     {% if is_admin %}
-    <a href="/admin" class="admin-link" style="color:white; text-decoration:none; padding:8px 12px; margin-left:auto; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px;">📊 Admin</a>
+    <a href="/admin" class="admin-nav-link">📊 Admin</a>
     {% endif %}
-    <a href="/logout" style="color:white; text-decoration:none; padding:8px 12px; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; margin-left:8px;">Logout</a>
+    <a href="/logout" class="admin-nav-link">Logout</a>
   </nav>
 </header>
+
+<!-- ============================= HOME TAB HERO ============================= -->
+<section class="hero" id="tab-home-hero">
+  <div>
+    <p class="hero-eyebrow">AI Guardian · Always On</p>
+    <h1>Your safety net, wrapped around every step.</h1>
+    <p>One tap for SOS, a private circle that can see where you are, and quiet tools —
+       fake calls, voice distress detection, evidence recording — for the moments that
+       need them.</p>
+    <div class="hero-stats">
+      <div class="hero-stat"><div class="num">&lt; 2s</div><div class="lbl">SOS dispatch</div></div>
+      <div class="hero-stat"><div class="num">6-point</div><div class="lbl">Route scoring</div></div>
+      <div class="hero-stat"><div class="num">24/7</div><div class="lbl">Guardian circle</div></div>
+    </div>
+  </div>
+  <div class="orb-stage" aria-hidden="true">
+    <div class="guardian-orb">
+      <div class="orb-core"></div>
+      <div class="orb-ring r1"></div>
+      <div class="orb-ring r2"></div>
+      <div class="orb-ring r3"></div>
+    </div>
+  </div>
+</section>
 
 <!-- ============================= HOME TAB ============================= -->
 <main id="tab-home" class="grid tab-panel">
@@ -254,6 +278,28 @@
         <button id="addContactBtn" class="btn">Add</button>
       </div>
       <ul id="contactsList" class="contacts-list"></ul>
+
+      <!-- ===================== TIER 3 PART 1: Bubble members ===================== -->
+      <h2 style="margin-top:20px">Bubble Members (SafeHer accounts)</h2>
+      <p class="muted">Invite another registered SafeHer user by email to let them see your live location. They must accept before they can view or track you.</p>
+
+      <div class="row">
+        <input id="inviteEmailInput" type="email" placeholder="their-email@example.com" />
+        <button id="sendInviteBtn" class="btn">Send Invite</button>
+      </div>
+
+      <h3 style="margin-top:14px; font-size:14px;">Invites waiting for your response</h3>
+      <ul id="incomingInvitesList" class="contacts-list"></ul>
+
+      <h3 style="margin-top:14px; font-size:14px;">People who can see your live location</h3>
+      <ul id="canTrackMeList" class="contacts-list"></ul>
+
+      <h3 style="margin-top:14px; font-size:14px;">Track a Bubble member</h3>
+      <div class="row">
+        <select id="trackableSelect"></select>
+        <button id="startTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
+        <button id="stopTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+      </div>
     </div>
 
     <div class="map-wrap">
@@ -298,6 +344,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {

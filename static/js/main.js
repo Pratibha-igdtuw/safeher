@@ -2,11 +2,46 @@
 // Helpers
 // ---------------------------------------------------------------------------
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  return res.json();
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch (networkErr) {
+    showNotification("⚠️ Connection problem", "Couldn't reach the server. Check your connection and try again.", "warning");
+    return { error: "network_error", _ok: false, _status: 0 };
+  }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (parseErr) {
+    body = { error: "invalid_response" };
+  }
+
+  if (!res.ok) {
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("Retry-After");
+      const waitMsg = retryAfter ? ` Try again in about ${Math.ceil(retryAfter / 60)} minute(s).` : " Please wait a bit before trying again.";
+      showNotification("⏳ Too many attempts", (body.message || "Rate limit reached.") + waitMsg, "warning");
+    } else if (res.status === 400 && body.error === "validation_failed") {
+      const fieldMsgs = Object.entries(body.fields || {})
+        .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join(", ") : msgs}`)
+        .join(" · ");
+      showNotification("⚠️ Please check your input", fieldMsgs || "Some fields are invalid.", "warning");
+    } else if (res.status === 400 && body.error === "invalid_json") {
+      showNotification("⚠️ Something went wrong", "The request could not be processed. Please try again.", "warning");
+    } else if (res.status === 401) {
+      // leave auth redirects/handling to the caller — don't spam a toast
+    } else if (res.status === 403) {
+      showNotification("🚫 Not allowed", body.error === "unauthorized" ? "You don't have access to that." : (body.message || "Action not permitted."), "warning");
+    } else if (res.status >= 500) {
+      showNotification("⚠️ Server error", "Something went wrong on our end. Please try again shortly.", "critical");
+    }
+  }
+
+  return Array.isArray(body) ? body : { ...body, _ok: res.ok, _status: res.status };
 }
 
 function getLocation() {
@@ -55,6 +90,35 @@ socket.on("risk_alert", (data) => {
 
 socket.on("test_alert", (data) => {
   showNotification("ℹ️ Test Notification", data.message, "info");
+});
+
+// ===== TIER 3 PART 1: Live tracking authorization events =====
+socket.on("tracking_denied", (data) => {
+  const reasons = {
+    not_authenticated: "You need to be logged in to view live locations.",
+    not_authorized: "You're not an accepted linked contact of this person yet.",
+    invalid_user_id: "Couldn't identify who you're trying to track.",
+  };
+  showNotification("🚫 Tracking denied", reasons[data.reason] || "You can't view this person's live location.", "warning");
+  stopTrackingUI();
+});
+
+socket.on("tracking_joined", (data) => {
+  showNotification("📍 Live tracking", "You're now viewing their live location.", "info");
+});
+
+socket.on("location_update", (data) => {
+  updateTrackedLocationOnMap(data);
+});
+
+socket.on("tracking_invite_received", (data) => {
+  showNotification("🔗 Bubble invite", `${data.from_email} invited you to their Bubble.`, "info");
+  loadLinkedContacts();
+});
+
+socket.on("tracking_invite_accepted", (data) => {
+  showNotification("✅ Invite accepted", `${data.by_email} accepted your Bubble invite.`, "info");
+  loadLinkedContacts();
 });
 
 function showNotification(title, message, type) {
@@ -133,6 +197,9 @@ tabButtons.forEach((btn) => {
     btn.classList.add("active");
     Object.values(tabPanels).forEach((p) => p.classList.add("hidden"));
     tabPanels[btn.dataset.tab].classList.remove("hidden");
+
+    const heroEl = document.getElementById("tab-home-hero");
+    if (heroEl) heroEl.classList.toggle("hidden", btn.dataset.tab !== "home");
 
     if (btn.dataset.tab === "map") {
       setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
@@ -1039,7 +1106,121 @@ socket.on("contact_location_update", (data) => {
 setTimeout(() => {
   initBubbleMap();
   loadContacts();
+  loadLinkedContacts();
 }, 100);
+
+// ---------------------------------------------------------------------------
+// TIER 3 PART 1: Bubble members (linked SafeHer accounts) + live tracking
+// ---------------------------------------------------------------------------
+const inviteEmailInput = document.getElementById("inviteEmailInput");
+const sendInviteBtn = document.getElementById("sendInviteBtn");
+const incomingInvitesList = document.getElementById("incomingInvitesList");
+const canTrackMeList = document.getElementById("canTrackMeList");
+const trackableSelect = document.getElementById("trackableSelect");
+const bubbleViewBtn = document.getElementById("bubbleViewBtn");
+const bubbleStopViewBtn = document.getElementById("bubbleStopViewBtn");
+
+let currentlyTrackingUserId = null;
+let trackedMarker = null;
+
+async function loadLinkedContacts() {
+  if (!incomingInvitesList) return; // Guardian tab markup not present on this page
+
+  const data = await api("/api/contacts/linked");
+  if (!data._ok) return;
+
+  const incoming = (data.people_i_can_track || []).filter((r) => r.status === "pending");
+  const accepted = (data.people_i_can_track || []).filter((r) => r.status === "accepted");
+  const viewers = data.people_who_can_track_me || [];
+
+  incomingInvitesList.innerHTML = incoming.length
+    ? incoming
+        .map(
+          (r) => `<li>${r.owner_email} invited you to their Bubble
+            <button class="btn" style="padding:2px 8px;font-size:11px;" onclick="respondToInvite(${r.id}, true)">Accept</button>
+            <button class="btn secondary" style="padding:2px 8px;font-size:11px;" onclick="respondToInvite(${r.id}, false)">Decline</button></li>`
+        )
+        .join("")
+    : `<li class="muted">No pending invites</li>`;
+
+  canTrackMeList.innerHTML = viewers.length
+    ? viewers
+        .map((r) => `<li>${r.contact_email} <span class="muted" style="font-size:11px;">(${r.status})</span></li>`)
+        .join("")
+    : `<li class="muted">No one can see your live location yet</li>`;
+
+  trackableSelect.innerHTML = accepted.length
+    ? accepted.map((r) => `<option value="${r.owner_user_id}">${r.owner_email}</option>`).join("")
+    : `<option value="">No accepted Bubble members yet</option>`;
+  bubbleViewBtn.disabled = accepted.length === 0;
+}
+
+window.respondToInvite = async (inviteId, accept) => {
+  await api(`/api/contacts/invite/${inviteId}/${accept ? "accept" : "decline"}`, { method: "POST" });
+  loadLinkedContacts();
+};
+
+sendInviteBtn?.addEventListener("click", async () => {
+  const email = inviteEmailInput.value.trim();
+  if (!email) {
+    showNotification("⚠️ Email required", "Enter the SafeHer account email you want to invite.", "warning");
+    return;
+  }
+  const result = await api("/api/contacts/invite", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+  if (result._ok) {
+    showNotification("✅ Invite sent", `Bubble invite sent to ${email}.`, "info");
+    inviteEmailInput.value = "";
+    loadLinkedContacts();
+  }
+});
+
+bubbleViewBtn?.addEventListener("click", () => {
+  const targetUserId = parseInt(trackableSelect.value, 10);
+  if (!targetUserId) return;
+  currentlyTrackingUserId = targetUserId;
+  socket.emit("join_tracking", { user_id: targetUserId });
+  bubbleViewBtn.classList.add("hidden");
+  bubbleStopViewBtn.classList.remove("hidden");
+});
+
+bubbleStopViewBtn?.addEventListener("click", () => {
+  stopTrackingUI();
+});
+
+function stopTrackingUI() {
+  if (currentlyTrackingUserId) {
+    socket.emit("leave_tracking", { user_id: currentlyTrackingUserId });
+  }
+  currentlyTrackingUserId = null;
+  if (trackedMarker && bubbleMap) {
+    bubbleMap.removeLayer(trackedMarker);
+    trackedMarker = null;
+  }
+  bubbleViewBtn?.classList.remove("hidden");
+  bubbleStopViewBtn?.classList.add("hidden");
+}
+
+function updateTrackedLocationOnMap(data) {
+  if (!bubbleMap || data.user_id !== currentlyTrackingUserId) return;
+  if (data.latitude == null || data.longitude == null) return;
+
+  if (trackedMarker) {
+    trackedMarker.setLatLng([data.latitude, data.longitude]);
+  } else {
+    trackedMarker = L.circleMarker([data.latitude, data.longitude], {
+      radius: 10,
+      fillColor: "#ff4757",
+      color: "#fff",
+      weight: 2,
+      opacity: 1,
+      fillOpacity: 0.8,
+    }).addTo(bubbleMap);
+  }
+  bubbleMap.setView([data.latitude, data.longitude], 14);
+}
 
 // ---------------------------------------------------------------------------
 // Community Safety Feed

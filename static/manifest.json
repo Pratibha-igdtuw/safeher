@@ -4,8 +4,8 @@
   "description": "AI Guardian for Women's Safety",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#764ba2",
-  "theme_color": "#667eea",
+  "background_color": "#0a0716",
+  "theme_color": "#8b5cf6",
   "orientation": "portrait",
   "icons": [
     {
