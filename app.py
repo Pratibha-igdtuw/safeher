@@ -1569,11 +1569,7 @@ def tracking_stop():
     return jsonify({"status": "tracking_stopped"})
 
 
-@app.route("/api/tracking/history", methods=["GET"])
-@login_required
-def tracking_history():
-    """Recent breadcrumb trail for the current user (used to redraw the
-    trail on page reload)."""
+
     conn = get_db()
     rows = conn.execute(
         "SELECT latitude, longitude, timestamp FROM location_history "
