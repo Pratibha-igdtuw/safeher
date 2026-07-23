@@ -24,6 +24,13 @@ from datetime import datetime, timedelta
 import sqlite3
 import os
 import math
+import io
+import base64
+import json
+
+# --- Tier 2: 2FA -------------------------------------------------------
+import pyotp
+import qrcode
 
 from utils.alerts import send_sos_alert
 from utils.route_safety import get_route_safety_score
@@ -166,6 +173,37 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+
+        -- ================= TIER 2 =================
+
+        CREATE TABLE IF NOT EXISTS live_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS location_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS offline_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            payload TEXT,
+            synced INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            synced_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
         """
     )
     conn.commit()
@@ -176,6 +214,14 @@ def init_db():
         conn.execute("ALTER TABLE risk_alerts ADD COLUMN prediction_score REAL")
     if "prediction_confidence" not in existing_cols:
         conn.execute("ALTER TABLE risk_alerts ADD COLUMN prediction_confidence REAL")
+
+    # --- Migration: add TOTP 2FA columns to users if missing ---
+    user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+    if "totp_secret" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+    if "totp_enabled" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+
     conn.commit()
     conn.close()
 
@@ -201,10 +247,18 @@ def login():
             return jsonify({"error": "email and password required"}), 400
 
         conn = get_db()
-        user_row = conn.execute("SELECT id, email, password_hash, is_admin FROM users WHERE email = ?", (email,)).fetchone()
+        user_row = conn.execute(
+            "SELECT id, email, password_hash, is_admin, totp_enabled FROM users WHERE email = ?", (email,)
+        ).fetchone()
         conn.close()
 
         if user_row and check_password_hash(user_row["password_hash"], password):
+            if user_row["totp_enabled"]:
+                # Password is correct, but TOTP code still required.
+                # Stash the user id in session; nothing is logged in yet.
+                session["pending_2fa_user_id"] = user_row["id"]
+                return jsonify({"status": "2fa_required"})
+
             user = User(user_row["id"], user_row["email"], user_row["is_admin"])
             login_user(user)
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
@@ -254,12 +308,139 @@ def logout():
 
 
 # ---------------------------------------------------------------------------
+# TIER 2 FEATURE: Two-Factor Authentication (TOTP)
+# ---------------------------------------------------------------------------
+@app.route("/api/2fa/status", methods=["GET"])
+@login_required
+def two_fa_status():
+    conn = get_db()
+    row = conn.execute("SELECT totp_enabled FROM users WHERE id = ?", (current_user.id,)).fetchone()
+    conn.close()
+    return jsonify({"enabled": bool(row["totp_enabled"]) if row else False})
+
+
+@app.route("/api/2fa/setup", methods=["POST"])
+@login_required
+def enable_2fa_setup():
+    """Generate a new TOTP secret + QR code for the current user.
+
+    The secret is stored right away but totp_enabled stays 0 until the user
+    proves they scanned it correctly via /api/2fa/confirm. This avoids a
+    user getting locked out because they saved a QR code that was never
+    actually confirmed.
+    """
+    secret = pyotp.random_base32()
+
+    conn = get_db()
+    conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?", (secret, current_user.id))
+    conn.commit()
+    conn.close()
+
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=current_user.email, issuer_name="SafeHer")
+
+    qr_img = qrcode.make(uri)
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    qr_base64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    return jsonify({
+        "secret": secret,
+        "qr_code": f"data:image/png;base64,{qr_base64}",
+    })
+
+
+@app.route("/api/2fa/confirm", methods=["POST"])
+@login_required
+def enable_2fa_confirm():
+    """Confirm setup by verifying a code generated from the just-scanned QR."""
+    data = request.get_json(force=True)
+    code = (data.get("code") or "").strip()
+
+    conn = get_db()
+    row = conn.execute("SELECT totp_secret FROM users WHERE id = ?", (current_user.id,)).fetchone()
+
+    if not row or not row["totp_secret"]:
+        conn.close()
+        return jsonify({"error": "call /api/2fa/setup first"}), 400
+
+    totp = pyotp.TOTP(row["totp_secret"])
+    if not totp.verify(code, valid_window=1):
+        conn.close()
+        return jsonify({"error": "invalid code"}), 401
+
+    conn.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (current_user.id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "2fa_enabled"})
+
+
+@app.route("/api/2fa/disable", methods=["POST"])
+@login_required
+def disable_2fa():
+    data = request.get_json(force=True)
+    password = data.get("password", "")
+
+    conn = get_db()
+    row = conn.execute("SELECT password_hash, is_admin FROM users WHERE id = ?", (current_user.id,)).fetchone()
+
+    if not row or not check_password_hash(row["password_hash"], password):
+        conn.close()
+        return jsonify({"error": "incorrect password"}), 401
+
+    if row["is_admin"]:
+        conn.close()
+        return jsonify({"error": "2FA is mandatory for admin accounts and cannot be disabled"}), 403
+
+    conn.execute("UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?", (current_user.id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "2fa_disabled"})
+
+
+@app.route("/api/2fa/verify-login", methods=["POST"])
+def verify_2fa_login():
+    """Second step of login for accounts with 2FA enabled."""
+    pending_user_id = session.get("pending_2fa_user_id")
+    if not pending_user_id:
+        return jsonify({"error": "no pending 2FA login"}), 400
+
+    data = request.get_json(force=True)
+    code = (data.get("code") or "").strip()
+
+    conn = get_db()
+    user_row = conn.execute(
+        "SELECT id, email, is_admin, totp_secret FROM users WHERE id = ?", (pending_user_id,)
+    ).fetchone()
+    conn.close()
+
+    if not user_row or not user_row["totp_secret"]:
+        session.pop("pending_2fa_user_id", None)
+        return jsonify({"error": "2FA not configured for this account"}), 400
+
+    totp = pyotp.TOTP(user_row["totp_secret"])
+    if not totp.verify(code, valid_window=1):
+        return jsonify({"error": "invalid or expired code"}), 401
+
+    session.pop("pending_2fa_user_id", None)
+    user = User(user_row["id"], user_row["email"], user_row["is_admin"])
+    login_user(user)
+    return jsonify({"status": "logged_in", "is_admin": user.is_admin})
+
+
+# ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 @app.route("/dashboard")
 @login_required
 def dashboard():
     return render_template("index.html", is_admin=current_user.is_admin)
+
+
+@app.route("/offline")
+def offline_fallback():
+    """Served by the browser (via the service worker's navigation fallback)
+    when a page request fails while offline."""
+    return render_template("offline.html")
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1085,67 @@ def guardian_status():
 
 
 # ---------------------------------------------------------------------------
+# TIER 2 FEATURE: Live location tracking (continuous, not one-time)
+# ---------------------------------------------------------------------------
+@app.route("/api/tracking/start", methods=["POST"])
+@login_required
+def tracking_start():
+    conn = get_db()
+    # close out any stale active session for this user first
+    conn.execute(
+        "UPDATE live_tracking SET status = 'inactive', ended_at = ? WHERE user_id = ? AND status = 'active'",
+        (datetime.utcnow().isoformat(), current_user.id),
+    )
+    conn.execute(
+        "INSERT INTO live_tracking (user_id, status, started_at) VALUES (?, 'active', ?)",
+        (current_user.id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    socketio.emit("tracking_started", {
+        "user_id": current_user.id,
+        "timestamp": datetime.utcnow().isoformat(),
+    }, room=f"tracking_{current_user.id}")
+
+    return jsonify({"status": "tracking_started"})
+
+
+@app.route("/api/tracking/stop", methods=["POST"])
+@login_required
+def tracking_stop():
+    conn = get_db()
+    conn.execute(
+        "UPDATE live_tracking SET status = 'inactive', ended_at = ? WHERE user_id = ? AND status = 'active'",
+        (datetime.utcnow().isoformat(), current_user.id),
+    )
+    conn.commit()
+    conn.close()
+
+    socketio.emit("tracking_stopped", {
+        "user_id": current_user.id,
+        "timestamp": datetime.utcnow().isoformat(),
+    }, room=f"tracking_{current_user.id}")
+
+    return jsonify({"status": "tracking_stopped"})
+
+
+@app.route("/api/tracking/history", methods=["GET"])
+@login_required
+def tracking_history():
+    """Recent breadcrumb trail for the current user (used to redraw the
+    trail on page reload)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT latitude, longitude, timestamp FROM location_history "
+        "WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+        (current_user.id,),
+    ).fetchall()
+    conn.close()
+    return jsonify(list(reversed([dict(r) for r in rows])))
+
+
+# ---------------------------------------------------------------------------
 # Community Safety Feed (user-specific)
 # ---------------------------------------------------------------------------
 @app.route("/api/feed", methods=["GET"])
@@ -944,6 +1186,63 @@ def add_feed_post():
 
 
 # ---------------------------------------------------------------------------
+# TIER 2 FEATURE: Offline-first PWA — sync queue
+# ---------------------------------------------------------------------------
+@app.route("/api/offline-actions", methods=["POST"])
+@login_required
+def sync_offline_actions():
+    """Called by the frontend once it comes back online. Body:
+    { "actions": [ { "type": "sos" | "risk_report", "payload": {...}, "queued_at": iso_str }, ... ] }
+    Each action is logged in offline_queue and, where we have a handler for
+    it, actually applied (e.g. an SOS raised while offline still triggers
+    a real alert once connectivity returns).
+    """
+    data = request.get_json(force=True)
+    actions = data.get("actions", [])
+    results = []
+
+    conn = get_db()
+    for action in actions:
+        action_type = action.get("type", "unknown")
+        payload = action.get("payload", {})
+
+        cur = conn.execute(
+            "INSERT INTO offline_queue (user_id, action_type, payload, synced, created_at) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (current_user.id, action_type, json.dumps(payload), action.get("queued_at") or datetime.utcnow().isoformat()),
+        )
+        queue_id = cur.lastrowid
+        conn.commit()
+
+        applied = False
+        if action_type == "sos":
+            lat = payload.get("latitude")
+            lng = payload.get("longitude")
+            conn.execute(
+                "INSERT INTO alerts (user_id, trigger_type, latitude, longitude, message, alert_type, created_at) "
+                "VALUES (?, 'offline_sync', ?, ?, ?, 'sos', ?)",
+                (current_user.id, lat, lng, payload.get("message", "SOS raised while offline"), datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            socketio.emit("sos_triggered", {
+                "message": f"Offline SOS from {current_user.email} has just synced",
+                "latitude": lat,
+                "longitude": lng,
+            }, room="sos_room")
+            applied = True
+
+        conn.execute(
+            "UPDATE offline_queue SET synced = 1, synced_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), queue_id),
+        )
+        conn.commit()
+        results.append({"type": action_type, "applied": applied, "queue_id": queue_id})
+
+    conn.close()
+    return jsonify({"status": "synced", "results": results})
+
+
+# ---------------------------------------------------------------------------
 # FEATURE 4: WebSocket Real-Time Notifications
 # ---------------------------------------------------------------------------
 @socketio.on("connect")
@@ -965,6 +1264,59 @@ def handle_subscribe_alerts():
     if current_user.is_authenticated:
         join_room(f"user_alerts_{current_user.id}")
         emit("subscribed", {"status": "listening for alerts"})
+
+
+# ---------------------------------------------------------------------------
+# TIER 2 FEATURE: Live location tracking — WebSocket side
+# ---------------------------------------------------------------------------
+@socketio.on("join_tracking")
+def handle_join_tracking(data):
+    """A viewer (e.g. someone with the Bubble/guardian map open) asks to
+    watch a given user's live location. NOTE: this project's `contacts`
+    table stores emergency-contact phone numbers, not linked app accounts,
+    so there's no first-class "is this viewer an authorized contact of
+    that user" check yet — anyone logged in can currently join any
+    tracking room they know the user_id for. If contacts get their own
+    app accounts later, add a permission check here before join_room().
+    """
+    if not current_user.is_authenticated:
+        return
+    target_user_id = data.get("user_id")
+    if target_user_id:
+        join_room(f"tracking_{target_user_id}")
+        emit("joined_tracking", {"user_id": target_user_id})
+
+
+@socketio.on("location_update")
+def handle_location_update(data):
+    """Received every ~10s from a client with active tracking on."""
+    if not current_user.is_authenticated:
+        return
+
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+    if lat is None or lng is None:
+        return
+
+    timestamp = datetime.utcnow().isoformat()
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO location_history (user_id, latitude, longitude, timestamp) VALUES (?, ?, ?, ?)",
+        (current_user.id, lat, lng, timestamp),
+    )
+    conn.commit()
+    conn.close()
+
+    socketio.emit("contact_location_update", {
+        "user_id": current_user.id,
+        "latitude": lat,
+        "longitude": lng,
+        "timestamp": timestamp,
+    }, room=f"tracking_{current_user.id}")
+
+    # Continuously check risk on every update, same ML pipeline as one-time shares
+    check_location_risk_internal(lat, lng, current_user.id)
 
 
 @app.route("/api/test-notification", methods=["POST"])

@@ -4,6 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>SafeHer — AI Guardian for Women's Safety</title>
+<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}" />
+<meta name="theme-color" content="#667eea" />
+<link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 <!-- FEATURE 4: WebSocket for real-time notifications -->
@@ -16,6 +20,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
 </head>
 <body>
+
+<div id="offlineBanner" class="offline-banner hidden">📡 Offline — actions will sync when you're back online</div>
 
 <header class="topbar">
   <div class="brand">
@@ -31,7 +37,7 @@
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     {% if is_admin %}
-    <a href="/admin" style="color:white; text-decoration:none; padding:8px 12px; margin-left:auto; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; hover:background:rgba(255,255,255,0.1);">📊 Admin</a>
+    <a href="/admin" class="admin-link" style="color:white; text-decoration:none; padding:8px 12px; margin-left:auto; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px;">📊 Admin</a>
     {% endif %}
     <a href="/logout" style="color:white; text-decoration:none; padding:8px 12px; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; margin-left:8px;">Logout</a>
   </nav>
@@ -116,6 +122,33 @@
     <ul id="alertsList" class="alerts-list"></ul>
   </section>
 
+  <section class="card" id="twoFaCard">
+    <h2>Account Security — 2FA</h2>
+    <p class="muted">Add an authenticator app (Google/Microsoft Authenticator) as a second login step.</p>
+    <p id="twoFaStatus" class="status-line"></p>
+
+    <div id="twoFaDisabledView">
+      <button id="setup2faBtn" class="btn safe-btn">Enable 2FA</button>
+    </div>
+
+    <div id="twoFaSetupView" class="hidden">
+      <img id="twoFaQr" alt="2FA QR code" style="max-width:180px; display:block; margin:12px 0; border-radius:8px;" />
+      <p class="muted">Scan this in your authenticator app, then enter the 6-digit code it shows:</p>
+      <div class="row">
+        <input id="twoFaConfirmCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
+        <button id="confirm2faBtn" class="btn">Confirm & Enable</button>
+      </div>
+    </div>
+
+    <div id="twoFaEnabledView" class="hidden">
+      <p class="status-line" style="color:#2dd4bf;">✓ 2FA is enabled on this account.</p>
+      <div class="row">
+        <input id="twoFaDisablePassword" type="password" placeholder="Password to disable" />
+        <button id="disable2faBtn" class="btn secondary">Disable 2FA</button>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <!-- ============================= MAP TAB ============================= -->
@@ -197,6 +230,14 @@
       <button id="shareLocationBtn" class="btn safe-btn">Start Sharing</button>
       <button id="stopSharingBtn" class="btn secondary hidden">Stop Sharing</button>
 
+      <div style="margin-top:14px;">
+        <h2 style="font-size:15px;">Live Tracking</h2>
+        <p class="muted" style="font-size:12px;">Continuous movement tracking — updates every 10 seconds and shows a breadcrumb trail, instead of one static point.</p>
+        <button id="startTrackingBtn" class="btn safe-btn">Start Live Tracking</button>
+        <button id="stopTrackingBtn" class="btn secondary hidden">Stop Live Tracking</button>
+        <p id="trackingStatus" class="status-line"></p>
+      </div>
+
       <div class="row" style="margin-top:10px">
         <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
           <input type="checkbox" id="privateModeToggle" style="flex:none; width:auto;" />
@@ -257,5 +298,14 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("{{ url_for('static', filename='service-worker.js') }}")
+        .then(() => console.log("SafeHer service worker registered"))
+        .catch((err) => console.warn("Service worker registration failed", err));
+    });
+  }
+</script>
 </body>
 </html>

@@ -436,3 +436,29 @@ textarea {
 @media (max-width: 600px) {
   .grid { grid-template-columns: 1fr; padding: 16px; }
 }
+
+/* Generic hidden utility — needed for elements toggled purely via
+   classList.add/remove("hidden") that don't have their own scoped rule
+   (e.g. stopSharingBtn, stopTrackingBtn, the 2FA setup/enabled views). */
+.hidden { display: none !important; }
+
+/* Offline banner (Tier 2: offline-first PWA) */
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: #ff4757;
+  color: white;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px;
+  z-index: 9999;
+}
+
+/* Admin link hover (moved out of inline style — inline styles can't use
+   pseudo-classes like :hover, which was causing the CSS lint error). */
+.admin-link:hover {
+  background: rgba(255, 255, 255, 0.1);
+}

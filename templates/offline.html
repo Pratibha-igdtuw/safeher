@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SafeHer — Offline</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    color: white;
+  }
+  .box {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 12px;
+    max-width: 420px;
+    width: 100%;
+    padding: 36px;
+    text-align: center;
+  }
+  .icon { font-size: 48px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin-bottom: 8px; }
+  p { font-size: 14px; opacity: 0.9; margin-bottom: 24px; line-height: 1.5; }
+  .sos-btn {
+    width: 100%;
+    padding: 18px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: white;
+    background: #ff4757;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  .sos-btn:active { transform: scale(0.98); }
+  .status-line { margin-top: 14px; font-size: 13px; min-height: 18px; }
+  .retry { margin-top: 20px; font-size: 13px; text-decoration: underline; cursor: pointer; opacity: 0.85; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="icon">📡</div>
+    <h1>You're offline</h1>
+    <p>
+      No internet connection right now. The Emergency SOS button below still
+      works — it will be queued and sent automatically as soon as SafeHer
+      reconnects.
+    </p>
+    <button id="offlineSosBtn" class="sos-btn">SOS — Queue Emergency Alert</button>
+    <p id="offlineStatus" class="status-line"></p>
+    <div class="retry" onclick="window.location.reload()">Try reconnecting</div>
+  </div>
+
+  <script>
+    const btn = document.getElementById("offlineSosBtn");
+    const statusEl = document.getElementById("offlineStatus");
+
+    btn.addEventListener("click", async () => {
+      const action = {
+        type: "sos",
+        payload: { message: "SOS raised while offline (from offline page)" },
+        queued_at: new Date().toISOString(),
+      };
+
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            action.payload.latitude = pos.coords.latitude;
+            action.payload.longitude = pos.coords.longitude;
+            queueAction(action);
+          },
+          () => queueAction(action),
+          { timeout: 3000 }
+        );
+      } else {
+        queueAction(action);
+      }
+    });
+
+    function queueAction(action) {
+      const key = "safeher_offline_queue";
+      const existing = JSON.parse(localStorage.getItem(key) || "[]");
+      existing.push(action);
+      localStorage.setItem(key, JSON.stringify(existing));
+      statusEl.textContent = "✓ Queued. Will send automatically once you're back online.";
+    }
+
+    window.addEventListener("online", () => (window.location.href = "/"));
+  </script>
+</body>
+</html>

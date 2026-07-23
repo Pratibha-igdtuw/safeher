@@ -37,7 +37,7 @@ try {
   socket = io();
 } catch (e) {
   console.warn("Socket.io unavailable — real-time alerts disabled", e);
-  socket = { on: () => {} }; // no-op fallback so rest of main.js still runs
+  socket = { on: () => {}, emit: () => {}, connected: false }; // no-op fallback so rest of main.js still runs
 }
 
 socket.on("connect", () => {
@@ -158,12 +158,25 @@ const sosStatus = document.getElementById("sosStatus");
 async function triggerSOS(triggerType = "manual") {
   sosStatus.textContent = "Getting location & sending alert...";
   const loc = await getLocation();
-  const result = await api("/api/sos", {
-    method: "POST",
-    body: JSON.stringify({ ...loc, trigger_type: triggerType }),
-  });
-  sosStatus.textContent = `Alert sent to ${result.contacts_notified} contact(s).`;
-  loadAlerts();
+
+  if (!navigator.onLine) {
+    queueOfflineAction("sos", { ...loc, trigger_type: triggerType, message: "SOS raised while offline" });
+    sosStatus.textContent = "⚠️ Offline — SOS queued, will send the moment you're back online.";
+    return;
+  }
+
+  try {
+    const result = await api("/api/sos", {
+      method: "POST",
+      body: JSON.stringify({ ...loc, trigger_type: triggerType }),
+    });
+    sosStatus.textContent = `Alert sent to ${result.contacts_notified} contact(s).`;
+    loadAlerts();
+  } catch (err) {
+    // Network failed even though navigator.onLine said we were online
+    queueOfflineAction("sos", { ...loc, trigger_type: triggerType, message: "SOS raised while offline" });
+    sosStatus.textContent = "⚠️ Couldn't reach the server — SOS queued, will retry automatically.";
+  }
 }
 
 sosBtn.addEventListener("click", () => triggerSOS("manual"));
@@ -947,6 +960,81 @@ stopSharingBtn.addEventListener("click", async () => {
   stopSharingBtn.classList.add("hidden");
 });
 
+// ---------------------------------------------------------------------------
+// TIER 2 FEATURE: Live Location Tracking (continuous, not one-time)
+// ---------------------------------------------------------------------------
+const startTrackingBtn = document.getElementById("startTrackingBtn");
+const stopTrackingBtn = document.getElementById("stopTrackingBtn");
+const trackingStatus = document.getElementById("trackingStatus");
+
+let trackingIntervalId = null;
+let breadcrumbTrail = []; // [ [lat, lng], ... ]
+let breadcrumbPolyline = null;
+let liveDotMarker = null;
+
+function drawBreadcrumb() {
+  if (!bubbleMap || breadcrumbTrail.length === 0) return;
+
+  if (breadcrumbPolyline) bubbleMap.removeLayer(breadcrumbPolyline);
+  breadcrumbPolyline = L.polyline(breadcrumbTrail, { color: "#667eea", weight: 3, opacity: 0.7 }).addTo(bubbleMap);
+
+  const latest = breadcrumbTrail[breadcrumbTrail.length - 1];
+  if (liveDotMarker) bubbleMap.removeLayer(liveDotMarker);
+  liveDotMarker = L.circleMarker(latest, {
+    radius: 8,
+    fillColor: "#2dd4bf",
+    color: "#fff",
+    weight: 2,
+    opacity: 1,
+    fillOpacity: 0.9,
+  }).addTo(bubbleMap);
+  bubbleMap.setView(latest, 15);
+}
+
+async function sendLocationUpdate() {
+  const loc = await getLocation();
+  if (loc.latitude == null || loc.longitude == null) return;
+
+  breadcrumbTrail.push([loc.latitude, loc.longitude]);
+  if (breadcrumbTrail.length > 50) breadcrumbTrail.shift();
+  drawBreadcrumb();
+
+  if (socket && socket.connected) {
+    socket.emit("location_update", { latitude: loc.latitude, longitude: loc.longitude });
+  }
+}
+
+startTrackingBtn.addEventListener("click", async () => {
+  await api("/api/tracking/start", { method: "POST" });
+  trackingStatus.textContent = "✓ Live tracking active — updating every 10s";
+  startTrackingBtn.classList.add("hidden");
+  stopTrackingBtn.classList.remove("hidden");
+
+  sendLocationUpdate(); // send one immediately
+  trackingIntervalId = setInterval(sendLocationUpdate, 10000);
+});
+
+stopTrackingBtn.addEventListener("click", async () => {
+  await api("/api/tracking/stop", { method: "POST" });
+  trackingStatus.textContent = "Live tracking stopped";
+  startTrackingBtn.classList.remove("hidden");
+  stopTrackingBtn.classList.add("hidden");
+
+  if (trackingIntervalId) {
+    clearInterval(trackingIntervalId);
+    trackingIntervalId = null;
+  }
+});
+
+// A watcher (e.g. this same account viewing on another device, or a future
+// contact-account feature) can join a user's tracking room to get updates:
+// socket.emit("join_tracking", { user_id: <id> });
+socket.on("contact_location_update", (data) => {
+  breadcrumbTrail.push([data.latitude, data.longitude]);
+  if (breadcrumbTrail.length > 50) breadcrumbTrail.shift();
+  drawBreadcrumb();
+});
+
 // Initialize Guardian map
 setTimeout(() => {
   initBubbleMap();
@@ -1001,3 +1089,122 @@ postFeedBtn.addEventListener("click", async () => {
 });
 
 loadFeed();
+
+// ---------------------------------------------------------------------------
+// TIER 2 FEATURE: 2FA setup UI (account settings card on Home tab)
+// ---------------------------------------------------------------------------
+const setup2faBtn = document.getElementById("setup2faBtn");
+const confirm2faBtn = document.getElementById("confirm2faBtn");
+const disable2faBtn = document.getElementById("disable2faBtn");
+const twoFaStatus = document.getElementById("twoFaStatus");
+const twoFaDisabledView = document.getElementById("twoFaDisabledView");
+const twoFaSetupView = document.getElementById("twoFaSetupView");
+const twoFaEnabledView = document.getElementById("twoFaEnabledView");
+const twoFaQr = document.getElementById("twoFaQr");
+const twoFaConfirmCode = document.getElementById("twoFaConfirmCode");
+const twoFaDisablePassword = document.getElementById("twoFaDisablePassword");
+
+function show2faView(view) {
+  twoFaDisabledView.classList.add("hidden");
+  twoFaSetupView.classList.add("hidden");
+  twoFaEnabledView.classList.add("hidden");
+  view.classList.remove("hidden");
+}
+
+async function refresh2faStatus() {
+  const res = await api("/api/2fa/status");
+  show2faView(res.enabled ? twoFaEnabledView : twoFaDisabledView);
+}
+
+setup2faBtn.addEventListener("click", async () => {
+  const res = await api("/api/2fa/setup", { method: "POST" });
+  twoFaQr.src = res.qr_code;
+  twoFaStatus.textContent = "Scan the QR code, then confirm with a code.";
+  show2faView(twoFaSetupView);
+});
+
+confirm2faBtn.addEventListener("click", async () => {
+  const code = twoFaConfirmCode.value.trim();
+  if (!code) return;
+
+  const res = await fetch("/api/2fa/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const data = await res.json();
+
+  if (res.ok) {
+    twoFaStatus.textContent = "✓ 2FA enabled.";
+    show2faView(twoFaEnabledView);
+  } else {
+    twoFaStatus.textContent = "✗ " + (data.error || "invalid code");
+  }
+});
+
+disable2faBtn.addEventListener("click", async () => {
+  const password = twoFaDisablePassword.value;
+  if (!password) return;
+
+  const res = await fetch("/api/2fa/disable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json();
+
+  if (res.ok) {
+    twoFaStatus.textContent = "2FA disabled.";
+    twoFaDisablePassword.value = "";
+    show2faView(twoFaDisabledView);
+  } else {
+    twoFaStatus.textContent = "✗ " + (data.error || "could not disable 2FA");
+  }
+});
+
+refresh2faStatus();
+
+// ---------------------------------------------------------------------------
+// TIER 2 FEATURE: Offline-first — banner, action queue, auto-sync
+// ---------------------------------------------------------------------------
+const OFFLINE_QUEUE_KEY = "safeher_offline_queue";
+const offlineBanner = document.getElementById("offlineBanner");
+
+function queueOfflineAction(type, payload) {
+  const queue = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || "[]");
+  queue.push({ type, payload, queued_at: new Date().toISOString() });
+  localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+}
+
+async function syncOfflineQueue() {
+  const queue = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || "[]");
+  if (queue.length === 0) return;
+
+  try {
+    await api("/api/offline-actions", {
+      method: "POST",
+      body: JSON.stringify({ actions: queue }),
+    });
+    localStorage.removeItem(OFFLINE_QUEUE_KEY);
+    console.log(`Synced ${queue.length} queued offline action(s).`);
+  } catch (err) {
+    console.warn("Offline queue sync failed, will retry next time we're online.", err);
+  }
+}
+
+function updateOfflineBanner() {
+  if (navigator.onLine) {
+    offlineBanner.classList.add("hidden");
+  } else {
+    offlineBanner.classList.remove("hidden");
+  }
+}
+
+window.addEventListener("offline", updateOfflineBanner);
+window.addEventListener("online", () => {
+  updateOfflineBanner();
+  syncOfflineQueue();
+});
+
+updateOfflineBanner();
+syncOfflineQueue(); // in case there were queued actions from a previous offline session

@@ -179,6 +179,14 @@
     <div class="loading" id="loading">Logging in...</div>
   </form>
 
+  <form id="twoFaForm" class="hidden">
+    <div class="form-group">
+      <label for="totpCode">Authenticator code</label>
+      <input type="text" id="totpCode" inputmode="numeric" maxlength="6" required placeholder="123456" />
+    </div>
+    <button type="submit" class="btn">Verify</button>
+  </form>
+
   <div class="status" id="status"></div>
 
   <div class="footer">
@@ -210,6 +218,17 @@
 
       const data = await res.json();
 
+      if (res.ok && data.status === "2fa_required") {
+        loadingEl.style.display = "none";
+        form.classList.add("hidden");
+        document.getElementById("twoFaForm").classList.remove("hidden");
+        statusEl.className = "status";
+        statusEl.style.color = "#667eea";
+        statusEl.textContent = "Enter the 6-digit code from your authenticator app.";
+        statusEl.style.display = "block";
+        return;
+      }
+
       if (res.ok) {
         statusEl.className = "status success";
         statusEl.textContent = "✓ Logged in! Redirecting...";
@@ -217,6 +236,37 @@
         setTimeout(() => (window.location.href = "/dashboard"), 1500);
       } else {
         throw new Error(data.error || "Login failed");
+      }
+    } catch (err) {
+      loadingEl.style.display = "none";
+      statusEl.className = "status error";
+      statusEl.textContent = "✗ " + err.message;
+      statusEl.style.display = "block";
+    }
+  });
+
+  const twoFaForm = document.getElementById("twoFaForm");
+  twoFaForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = document.getElementById("totpCode").value.trim();
+    statusEl.style.display = "none";
+    loadingEl.style.display = "block";
+
+    try {
+      const res = await fetch("/api/2fa/verify-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        statusEl.className = "status success";
+        statusEl.textContent = "✓ Verified! Redirecting...";
+        statusEl.style.display = "block";
+        setTimeout(() => (window.location.href = "/dashboard"), 1000);
+      } else {
+        throw new Error(data.error || "Invalid code");
       }
     } catch (err) {
       loadingEl.style.display = "none";
