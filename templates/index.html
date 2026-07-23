@@ -37,7 +37,11 @@
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     {% if is_admin %}
-    <a href="/admin" class="admin-link" style="color:white; text-decoration:none; padding:8px 12px; margin-left:auto; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px;">📊 Admin</a>
+<<button class="tab-btn" data-tab="community">Community</button>
+{% if is_admin %}
+<a href="/admin" class="admin-nav-link">📊 Admin</a>
+{% endif %}
+
     {% endif %}
     <a href="/logout" style="color:white; text-decoration:none; padding:8px 12px; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; margin-left:8px;">Logout</a>
   </nav>
@@ -254,6 +258,28 @@
         <button id="addContactBtn" class="btn">Add</button>
       </div>
       <ul id="contactsList" class="contacts-list"></ul>
+
+      <!-- ===================== TIER 3 PART 1: Bubble members ===================== -->
+      <h2 style="margin-top:20px">Bubble Members (SafeHer accounts)</h2>
+      <p class="muted">Invite another registered SafeHer user by email to let them see your live location. They must accept before they can view or track you.</p>
+
+      <div class="row">
+        <input id="inviteEmailInput" type="email" placeholder="their-email@example.com" />
+        <button id="sendInviteBtn" class="btn">Send Invite</button>
+      </div>
+
+      <h3 style="margin-top:14px; font-size:14px;">Invites waiting for your response</h3>
+      <ul id="incomingInvitesList" class="contacts-list"></ul>
+
+      <h3 style="margin-top:14px; font-size:14px;">People who can see your live location</h3>
+      <ul id="canTrackMeList" class="contacts-list"></ul>
+
+      <h3 style="margin-top:14px; font-size:14px;">Track a Bubble member</h3>
+      <div class="row">
+        <select id="trackableSelect"></select>
+        <button id="startTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
+        <button id="stopTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+      </div>
     </div>
 
     <div class="map-wrap">

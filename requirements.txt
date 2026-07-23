@@ -5,6 +5,11 @@ python-engineio>=4.0.0
 Flask-Login>=0.6.0
 Werkzeug>=2.0.0
 
+# --- Tier 3 Part 1: Security hardening --------------------------------------
+Flask-Limiter>=3.5.0        # /login, /signup, and (future) 2FA rate limiting
+flask-talisman>=1.1.0       # CSP / X-Frame-Options / X-Content-Type-Options
+marshmallow>=3.20.0         # request-body validation layer (validators.py)
+
 # --- Tier 1: real audio ML (Feature 1) -------------------------------------
 # Loading tensorflow_hub's YAMNet requires outbound network access to
 # tfhub.dev on first run (weights are cached locally after that). If these

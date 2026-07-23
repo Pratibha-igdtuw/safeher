@@ -457,8 +457,18 @@ textarea {
   z-index: 9999;
 }
 
-/* Admin link hover (moved out of inline style — inline styles can't use
-   pseudo-classes like :hover, which was causing the CSS lint error). */
-.admin-link:hover {
-  background: rgba(255, 255, 255, 0.1);
+/* Admin navigation link */
+.admin-nav-link {
+  color: white;
+  text-decoration: none;
+  padding: 8px 12px;
+  margin-left: auto;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 4px;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.admin-nav-link:hover {
+  background: rgba(255,255,255,0.1);
 }
