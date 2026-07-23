@@ -37,7 +37,15 @@
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     {% if is_admin %}
+<<<<<<< HEAD
     <a href="/admin" class="admin-nav-link">📊 Admin</a>
+=======
+<<button class="tab-btn" data-tab="community">Community</button>
+{% if is_admin %}
+<a href="/admin" class="admin-nav-link">📊 Admin</a>
+{% endif %}
+
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
     {% endif %}
     <a href="/logout" class="admin-nav-link">Logout</a>
   </nav>

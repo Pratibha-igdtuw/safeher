@@ -1,6 +1,6 @@
 -r requirements.txt
 
+# Test suite (tests/test_2fa.py, tests/test_tracking.py, tests/test_offline_sync.py,
+# plus Tier 1's tests/test_features.py)
 pytest>=7.4.0
 pytest-cov>=4.1.0
-pytest-asyncio>=0.21.0
-python-socketio[client]>=5.0.0

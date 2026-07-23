@@ -16,9 +16,11 @@ Run:
 Then open http://127.0.0.1:5000 in your browser.
 """
 
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, g
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import sqlite3
@@ -27,10 +29,27 @@ import math
 import io
 import base64
 import json
+import hashlib
+import logging
+from logging.handlers import RotatingFileHandler
+
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load environment variables from a local .env file (if present) BEFORE
+# config.py is imported below — config.py's Config classes read
+# os.environ at import/class-definition time, so .env has to be loaded
+# first or those values never make it in. No-op in environments (CI, prod
+# containers) where real environment variables are already set some other
+# way.
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # --- Tier 2: 2FA -------------------------------------------------------
 import pyotp
 import qrcode
+import logging
+from collections import defaultdict
 
 from utils.alerts import send_sos_alert
 from utils.route_safety import get_route_safety_score
@@ -38,16 +57,204 @@ from utils.distress_detector import check_distress
 from utils.safety_services import get_nearby_services
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
+from validators import (
+    validate_json,
+    LoginSchema,
+    SignupSchema,
+    ContactSchema,
+    ContactInviteSchema,
+    SOSSchema,
+    DistressCheckSchema,
+    RouteSafetySchema,
+    CheckinStartSchema,
+    AuditSchema,
+    CheckLocationRiskSchema,
+    GuardianShareSchema,
+    FeedPostSchema,
+)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "safeher.db")
+from config import get_config
+
+# ---------------------------------------------------------------------------
+# TIER 3 PART 1: environment-driven config
+# ---------------------------------------------------------------------------
+# FLASK_ENV=production enables secure cookies + HTTPS-only headers.
+# Defaults to "development" so local `python app.py` still works over http.
+FLASK_ENV = os.environ.get("FLASK_ENV", "development").lower()
+IS_PRODUCTION = FLASK_ENV == "production"
+
+# Comma-separated allow-list, e.g. "https://safeher.app,https://www.safeher.app"
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://127.0.0.1:5000,http://localhost:5000").split(",")
+    if origin.strip()
+]
 
 app = Flask(__name__)
-app.secret_key = "safeher-secret-key-change-in-production"
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config.from_object(get_config())
+
+DB_PATH = app.config["DATABASE_PATH"]  # kept for any code/tests referencing DB_PATH directly
+
+socketio = SocketIO(app, cors_allowed_origins=app.config["CORS_ORIGINS"])
+app.secret_key = os.environ.get("SECRET_KEY", "safeher-secret-key-change-in-production")
+
+# --- Secure session / cookie config ---
+app.config.update(
+    SESSION_COOKIE_SECURE=IS_PRODUCTION,   # only sent over HTTPS in production
+    SESSION_COOKIE_HTTPONLY=True,          # never accessible to JS
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+# --- Rate limiting storage (in-memory by default; point RATELIMIT_STORAGE_URI
+#     at redis:// in production so limits are shared across workers) ---
+app.config["RATELIMIT_STORAGE_URI"] = os.environ.get("RATELIMIT_STORAGE_URI", "memory://")
+app.config["RATELIMIT_HEADERS_ENABLED"] = True  # adds Retry-After / X-RateLimit-* headers
+
+socketio = SocketIO(app, cors_allowed_origins=CORS_ALLOWED_ORIGINS)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    storage_uri=app.config["RATELIMIT_STORAGE_URI"],
+    default_limits=[],  # no global default; limits are applied per-route below
+)
+
+# --- Security headers (flask-talisman) ---
+try:
+    from flask_talisman import Talisman
+
+    Talisman(
+        app,
+        force_https=IS_PRODUCTION,
+        strict_transport_security=IS_PRODUCTION,
+        session_cookie_secure=IS_PRODUCTION,
+        content_security_policy={
+            "default-src": "'self'",
+            "script-src": "'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com",
+            "style-src": "'self' 'unsafe-inline' https://unpkg.com",
+            "img-src": "'self' data: https://*.tile.openstreetmap.org",
+            "connect-src": "'self' ws: wss:",
+        },
+        content_security_policy_nonce_in=[],
+    )
+except ImportError:  # pragma: no cover - only hit if flask-talisman isn't installed
+    @app.after_request
+    def _fallback_security_headers(resp):
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org; "
+            "script-src 'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: wss:",
+        )
+        return resp
+
+
+# ---------------------------------------------------------------------------
+# TIER 3 PART 1: failed-login logging (foundation for future lockout/alerting)
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+security_logger = logging.getLogger("safeher.security")
+
+_failed_login_counts = defaultdict(int)
+
+
+def log_failed_login(email, ip):
+    key = (email, ip)
+    _failed_login_counts[key] += 1
+    security_logger.warning(
+        "Failed login attempt #%d for email=%s from ip=%s",
+        _failed_login_counts[key], email, ip,
+    )
+
+
+def log_successful_login(email, ip):
+    _failed_login_counts.pop((email, ip), None)
+
+
+@app.errorhandler(429)
+def handle_rate_limit(e):
+    # flask-limiter (RATELIMIT_HEADERS_ENABLED=True, above) already attaches
+    # a Retry-After header to the response for us; surface that same value
+    # in the JSON body too so clients that don't read headers still get it.
+    resp = jsonify({
+        "error": "rate_limited",
+        "message": "Too many attempts. Please wait before trying again.",
+    })
+    resp.status_code = 429
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Structured logging (console + rotating file handler)
+# ---------------------------------------------------------------------------
+def configure_logging(flask_app):
+    """INFO for normal request/connect events, WARNING for failed logins
+    and invalid 2FA codes, ERROR for unhandled exceptions. Every SOS
+    trigger, failed login attempt, and 2FA failure is logged with a
+    timestamp + hashed user identifier — the audit trail a real safety
+    app needs."""
+    log_dir = flask_app.config["LOG_DIR"]
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_level = getattr(logging, str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(), logging.INFO)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+    )
+
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "app.log"),
+        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
+        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Avoid duplicate handlers if configure_logging() runs more than once
+    # (e.g. re-imported by tests).
+    root_logger.handlers = [file_handler, console_handler]
+
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.handlers = [file_handler, console_handler]
+    werkzeug_logger.setLevel(log_level)
+
+    return logging.getLogger("safeher")
+
+
+logger = configure_logging(app)
+
+
+def hash_identifier(value):
+    """One-way hash of an identifying value (email, user id) for audit
+    logs, so log files don't contain raw PII while still letting the same
+    user's events be correlated across log lines."""
+    if value is None:
+        return "unknown"
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(exc):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        # Let Flask's normal handling deal with expected HTTP errors
+        # (404s, etc.) instead of logging them as unhandled crashes.
+        return exc
+
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.path, exc, exc_info=True)
+    return jsonify({"error": "internal server error"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +281,28 @@ def load_user(user_id):
 # Database helpers
 # ---------------------------------------------------------------------------
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    """Open a SQLite connection configured for concurrent web-app usage.
+
+    Two things make "database is locked" errors much rarer under
+    concurrent writes (e.g. simultaneous SOS + location-history inserts):
+    - WAL mode lets readers and a writer proceed concurrently instead of
+      sqlite3's default behavior of blocking all readers during a write.
+    - A busy timeout makes SQLite retry for a bit instead of immediately
+      raising `sqlite3.OperationalError: database is locked` when it does
+      hit contention.
+
+    Reads DATABASE_PATH from app.config so DATABASE_URL (see config.py /
+    .env.example) controls where the file lives.
+    """
+    db_path = app.config.get("DATABASE_PATH", DB_PATH)
+    timeout_s = app.config.get("DB_CONNECT_TIMEOUT_S", 10)
+    busy_timeout_ms = app.config.get("DB_BUSY_TIMEOUT_MS", 5000)
+
+    conn = sqlite3.connect(db_path, timeout=timeout_s)
     conn.row_factory = sqlite3.Row
+    if db_path != ":memory:":
+        conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     return conn
 
 
@@ -162,6 +389,17 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS linked_contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            contact_user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            UNIQUE(user_id, contact_user_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(contact_user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS risk_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -236,15 +474,26 @@ def index():
     return redirect(url_for("login"))
 
 
+def _login_rate_limit_key():
+    """5 attempts per 15 min per IP + email combination."""
+    email = ""
+    try:
+        body = request.get_json(silent=True) or {}
+        email = (body.get("email") or "").strip().lower()
+    except Exception:
+        pass
+    return f"{get_remote_address()}:{email}"
+
+
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per 15 minutes", methods=["POST"], key_func=_login_rate_limit_key)
+@validate_json(LoginSchema)
 def login():
     if request.method == "POST":
-        data = request.get_json(force=True)
-        email = data.get("email", "").strip().lower()
-        password = data.get("password", "")
-
-        if not email or not password:
-            return jsonify({"error": "email and password required"}), 400
+        data = g.validated_data
+        email = data["email"].strip().lower()
+        password = data["password"]
+        ip = get_remote_address()
 
         conn = get_db()
         user_row = conn.execute(
@@ -257,26 +506,30 @@ def login():
                 # Password is correct, but TOTP code still required.
                 # Stash the user id in session; nothing is logged in yet.
                 session["pending_2fa_user_id"] = user_row["id"]
+                logger.info("Password verified, awaiting 2FA code: user=%s", hash_identifier(email))
                 return jsonify({"status": "2fa_required"})
 
+            log_successful_login(email, ip)
             user = User(user_row["id"], user_row["email"], user_row["is_admin"])
             login_user(user)
+            logger.info("Successful login: user=%s", hash_identifier(email))
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
         else:
+            logger.warning("Failed login attempt: user=%s", hash_identifier(email))
+            log_failed_login(email, ip)
             return jsonify({"error": "invalid email or password"}), 401
 
     return render_template("login.html")
 
 
 @app.route("/signup", methods=["GET", "POST"])
+@limiter.limit("10 per hour", methods=["POST"])
+@validate_json(SignupSchema)
 def signup():
     if request.method == "POST":
-        data = request.get_json(force=True)
-        email = data.get("email", "").strip().lower()
-        password = data.get("password", "")
-
-        if not email or not password:
-            return jsonify({"error": "email and password required"}), 400
+        data = g.validated_data
+        email = data["email"].strip().lower()
+        password = data["password"]
 
         conn = get_db()
         existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
@@ -366,11 +619,13 @@ def enable_2fa_confirm():
     totp = pyotp.TOTP(row["totp_secret"])
     if not totp.verify(code, valid_window=1):
         conn.close()
+        logger.warning("Invalid 2FA setup code: user=%s", hash_identifier(current_user.email))
         return jsonify({"error": "invalid code"}), 401
 
     conn.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (current_user.id,))
     conn.commit()
     conn.close()
+    logger.info("2FA enabled: user=%s", hash_identifier(current_user.email))
     return jsonify({"status": "2fa_enabled"})
 
 
@@ -385,6 +640,7 @@ def disable_2fa():
 
     if not row or not check_password_hash(row["password_hash"], password):
         conn.close()
+        logger.warning("Failed 2FA-disable attempt (wrong password): user=%s", hash_identifier(current_user.email))
         return jsonify({"error": "incorrect password"}), 401
 
     if row["is_admin"]:
@@ -419,9 +675,11 @@ def verify_2fa_login():
 
     totp = pyotp.TOTP(user_row["totp_secret"])
     if not totp.verify(code, valid_window=1):
+        logger.warning("Invalid 2FA login code: user=%s", hash_identifier(user_row["email"]))
         return jsonify({"error": "invalid or expired code"}), 401
 
     session.pop("pending_2fa_user_id", None)
+    logger.info("Successful 2FA login: user=%s", hash_identifier(user_row["email"]))
     user = User(user_row["id"], user_row["email"], user_row["is_admin"])
     login_user(user)
     return jsonify({"status": "logged_in", "is_admin": user.is_admin})
@@ -528,14 +786,12 @@ def list_contacts():
 
 @app.route("/api/contacts", methods=["POST"])
 @login_required
+@validate_json(ContactSchema)
 def add_contact():
-    data = request.get_json(force=True)
-    name = data.get("name", "").strip()
-    phone = data.get("phone", "").strip()
+    data = g.validated_data
+    name = data["name"].strip()
+    phone = data["phone"].strip()
     relation = data.get("relation", "").strip()
-
-    if not name or not phone:
-        return jsonify({"error": "name and phone are required"}), 400
 
     conn = get_db()
     conn.execute(
@@ -567,12 +823,168 @@ def delete_contact(contact_id):
 
 
 # ---------------------------------------------------------------------------
+# TIER 3 PART 1: Linked contacts — authorizes who may join a user's live
+# tracking room (`join_tracking`) and fetch their `/api/tracking/history`.
+#
+# Semantics of a linked_contacts row (user_id, contact_user_id, status):
+#   user_id         = the person being tracked (the "owner")
+#   contact_user_id = the person granted permission to view them (the "viewer")
+# An invite is created by the owner naming a viewer's email; the viewer must
+# accept before `join_tracking` / `/api/tracking/history` will allow them in.
+# ---------------------------------------------------------------------------
+def _find_user_by_email(conn, email):
+    return conn.execute("SELECT id, email FROM users WHERE email = ?", (email,)).fetchone()
+
+
+def is_accepted_linked_contact(conn, owner_user_id, viewer_user_id):
+    """True if viewer_user_id is an accepted linked contact of owner_user_id."""
+    if owner_user_id == viewer_user_id:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM linked_contacts WHERE user_id = ? AND contact_user_id = ? AND status = 'accepted'",
+        (owner_user_id, viewer_user_id),
+    ).fetchone()
+    return row is not None
+
+
+@app.route("/api/contacts/invite", methods=["POST"])
+@login_required
+@validate_json(ContactInviteSchema)
+def invite_linked_contact():
+    email = g.validated_data["email"].strip().lower()
+
+    conn = get_db()
+    target = _find_user_by_email(conn, email)
+    if not target:
+        conn.close()
+        return jsonify({"error": "no SafeHer account with that email"}), 404
+
+    if target["id"] == current_user.id:
+        conn.close()
+        return jsonify({"error": "you cannot invite yourself"}), 400
+
+    existing = conn.execute(
+        "SELECT id, status FROM linked_contacts WHERE user_id = ? AND contact_user_id = ?",
+        (current_user.id, target["id"]),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({"error": f"already {existing['status']}", "invite_id": existing["id"]}), 409
+
+    cur = conn.execute(
+        "INSERT INTO linked_contacts (user_id, contact_user_id, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (current_user.id, target["id"], datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    invite_id = cur.lastrowid
+    conn.close()
+
+    # Real-time nudge to the invitee if they're online
+    socketio.emit("tracking_invite_received", {
+        "invite_id": invite_id,
+        "from_email": current_user.email,
+    }, room=f"user_{target['id']}")
+
+    return jsonify({"status": "invited", "invite_id": invite_id}), 201
+
+
+@app.route("/api/contacts/invite/<int:invite_id>/accept", methods=["POST"])
+@login_required
+def accept_linked_contact_invite(invite_id):
+    conn = get_db()
+    invite = conn.execute("SELECT * FROM linked_contacts WHERE id = ?", (invite_id,)).fetchone()
+    if not invite or invite["contact_user_id"] != current_user.id:
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+    if invite["status"] != "pending":
+        conn.close()
+        return jsonify({"error": f"invite is already {invite['status']}"}), 409
+
+    conn.execute("UPDATE linked_contacts SET status = 'accepted' WHERE id = ?", (invite_id,))
+    conn.commit()
+    owner_id = invite["user_id"]
+    conn.close()
+
+    socketio.emit("tracking_invite_accepted", {
+        "invite_id": invite_id,
+        "by_email": current_user.email,
+    }, room=f"user_{owner_id}")
+
+    return jsonify({"status": "accepted"})
+
+
+@app.route("/api/contacts/invite/<int:invite_id>/decline", methods=["POST"])
+@login_required
+def decline_linked_contact_invite(invite_id):
+    conn = get_db()
+    invite = conn.execute("SELECT * FROM linked_contacts WHERE id = ?", (invite_id,)).fetchone()
+    if not invite or invite["contact_user_id"] != current_user.id:
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
+    conn.execute("DELETE FROM linked_contacts WHERE id = ?", (invite_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "declined"})
+
+
+@app.route("/api/contacts/linked", methods=["GET"])
+@login_required
+def list_linked_contacts():
+    """Everything relevant to the current user: invites/contacts they've
+    granted access to (people who can track *them*), and people who've
+    granted *them* access to track others."""
+    conn = get_db()
+    granted_to_others = conn.execute(
+        """SELECT lc.id, lc.status, lc.created_at, u.email AS contact_email, u.id AS contact_user_id
+           FROM linked_contacts lc JOIN users u ON u.id = lc.contact_user_id
+           WHERE lc.user_id = ? ORDER BY lc.id DESC""",
+        (current_user.id,),
+    ).fetchall()
+    can_track = conn.execute(
+        """SELECT lc.id, lc.status, lc.created_at, u.email AS owner_email, u.id AS owner_user_id
+           FROM linked_contacts lc JOIN users u ON u.id = lc.user_id
+           WHERE lc.contact_user_id = ? ORDER BY lc.id DESC""",
+        (current_user.id,),
+    ).fetchall()
+    conn.close()
+    return jsonify({
+        "people_who_can_track_me": [dict(r) for r in granted_to_others],
+        "people_i_can_track": [dict(r) for r in can_track],
+    })
+
+
+@app.route("/api/tracking/history", methods=["GET"])
+@login_required
+def tracking_history():
+    """TIER 3 PART 1: only the owner themselves, or an accepted linked
+    contact of the owner, may fetch a user's location-sharing history."""
+    target_user_id = request.args.get("user_id", type=int)
+    if target_user_id is None:
+        target_user_id = current_user.id  # default: your own history
+
+    conn = get_db()
+    if not is_accepted_linked_contact(conn, target_user_id, current_user.id):
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
+    rows = conn.execute(
+        "SELECT latitude, longitude, active, updated_at FROM guardian_shares "
+        "WHERE user_id = ? ORDER BY id DESC LIMIT 200",
+        (target_user_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
 # SOS (with WebSocket real-time notification)
 # ---------------------------------------------------------------------------
 @app.route("/api/sos", methods=["POST"])
 @login_required
+@validate_json(SOSSchema)
 def trigger_sos():
-    data = request.get_json(force=True)
+    data = g.validated_data
     lat = data.get("latitude")
     lng = data.get("longitude")
     trigger_type = data.get("trigger_type", "manual")
@@ -594,6 +1006,11 @@ def trigger_sos():
     )
     conn.commit()
     conn.close()
+
+    logger.info(
+        "SOS triggered: user=%s trigger_type=%s contacts_notified=%d",
+        hash_identifier(current_user.email), trigger_type, len(contacts),
+    )
 
     # ===== FEATURE 4: WebSocket real-time notification =====
     socketio.emit("sos_triggered", {
@@ -630,6 +1047,7 @@ def list_alerts():
 # ---------------------------------------------------------------------------
 @app.route("/api/distress-check", methods=["POST"])
 @login_required
+@validate_json(DistressCheckSchema)
 def distress_check():
     """
     FEATURE 1: REAL AI-BASED DISTRESS DETECTION
@@ -637,7 +1055,7 @@ def distress_check():
     Browser uses TensorFlow.js + YAMNet to detect audio distress.
     This endpoint acts as keyword-match fallback if ML inference fails.
     """
-    data = request.get_json(force=True)
+    data = g.validated_data
     transcript = data.get("transcript", "")
     result = check_distress(transcript)
     
@@ -661,7 +1079,13 @@ def audio_classify():
     utils/audio_classifier.py for details), and auto-triggers SOS above
     the confidence threshold.
     """
-    data = request.get_json(force=True)
+    # NOTE: the spectrogram/waveform payload here is large, numeric, and
+    # shape-dependent on the client-side ML pipeline — not a good fit for a
+    # fixed marshmallow schema. We still avoid request.get_json(force=True)
+    # crashing on malformed JSON, returning a clean 400 instead of a 500.
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid_json", "message": "Request body must be a JSON object"}), 400
     result = classify_audio_payload(data)
 
     if result.get("auto_trigger_sos"):
@@ -713,14 +1137,20 @@ def trigger_sos_internal(user_id, lat, lng, trigger_type):
     conn.commit()
     conn.close()
 
+    logger.info(
+        "SOS triggered (internal): user=%s trigger_type=%s contacts_notified=%d",
+        hash_identifier(user_email), trigger_type, len(contacts),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Route safety scoring
 # ---------------------------------------------------------------------------
 @app.route("/api/route-safety", methods=["POST"])
 @login_required
+@validate_json(RouteSafetySchema)
 def route_safety():
-    data = request.get_json(force=True)
+    data = g.validated_data
     origin = data.get("origin", "")
     destination = data.get("destination", "")
     result = get_route_safety_score(origin, destination)
@@ -732,9 +1162,10 @@ def route_safety():
 # ---------------------------------------------------------------------------
 @app.route("/api/checkin/start", methods=["POST"])
 @login_required
+@validate_json(CheckinStartSchema)
 def start_checkin():
-    data = request.get_json(force=True)
-    minutes = int(data.get("minutes", 15))
+    data = g.validated_data
+    minutes = data["minutes"]
     deadline = datetime.utcnow() + timedelta(minutes=minutes)
 
     conn = get_db()
@@ -800,15 +1231,14 @@ def list_audits():
 
 @app.route("/api/audits", methods=["POST"])
 @login_required
+@validate_json(AuditSchema)
 def add_audit():
-    data = request.get_json(force=True)
-    lat = data.get("latitude")
-    lng = data.get("longitude")
-    if lat is None or lng is None:
-        return jsonify({"error": "latitude and longitude are required"}), 400
+    data = g.validated_data
+    lat = data["latitude"]
+    lng = data["longitude"]
 
     params = ["lighting", "openness", "walkpath", "security", "transport", "crowd"]
-    values = {p: int(data.get(p, 2)) for p in params}
+    values = {p: data[p] for p in params}
     overall_score = round(sum(values.values()) / (len(params) * 4) * 100)
 
     conn = get_db()
@@ -843,6 +1273,7 @@ def add_audit():
 # ---------------------------------------------------------------------------
 @app.route("/api/check-location-risk", methods=["POST"])
 @login_required
+@validate_json(CheckLocationRiskSchema)
 def check_location_risk():
     """
     TIER 1 FEATURE 2 ENHANCEMENT: ML-powered risk prediction.
@@ -855,12 +1286,9 @@ def check_location_risk():
     features (nearby_audits_count / avg_nearby_score), so this is a
     strict enhancement rather than a replacement of that logic.
     """
-    data = request.get_json(force=True)
-    lat = data.get("latitude")
-    lng = data.get("longitude")
-
-    if lat is None or lng is None:
-        return jsonify({"error": "latitude and longitude required"}), 400
+    data = g.validated_data
+    lat = data["latitude"]
+    lng = data["longitude"]
 
     conn = get_db()
     prediction, nearest_threat, threat_distance = _predict_location_risk(conn, lat, lng)
@@ -999,8 +1427,9 @@ def nearby_services():
 # ---------------------------------------------------------------------------
 @app.route("/api/guardian/share", methods=["POST"])
 @login_required
+@validate_json(GuardianShareSchema)
 def guardian_share():
-    data = request.get_json(force=True)
+    data = g.validated_data
     lat = data.get("latitude")
     lng = data.get("longitude")
 
@@ -1015,6 +1444,16 @@ def guardian_share():
 
     # ===== FEATURE 2 INTEGRATION: Check for risk when sharing =====
     check_location_risk_internal(lat, lng, current_user.id)
+
+    # ===== TIER 3 PART 1: push the live position only to the tracking
+    # room for THIS user — only sockets that passed the join_tracking
+    # authorization check below are in that room. =====
+    socketio.emit("location_update", {
+        "user_id": current_user.id,
+        "latitude": lat,
+        "longitude": lng,
+        "timestamp": datetime.utcnow().isoformat(),
+    }, room=f"tracking_{current_user.id}")
 
     return jsonify({"status": "sharing"})
 
@@ -1159,12 +1598,10 @@ def list_feed():
 
 @app.route("/api/feed", methods=["POST"])
 @login_required
+@validate_json(FeedPostSchema)
 def add_feed_post():
-    data = request.get_json(force=True)
-    message = data.get("message", "").strip()
-    if not message:
-        return jsonify({"error": "message is required"}), 400
-
+    data = g.validated_data
+    message = data["message"].strip()
     post_type = data.get("post_type", "alert")
     conn = get_db()
     conn.execute(
@@ -1230,6 +1667,10 @@ def sync_offline_actions():
                 "longitude": lng,
             }, room="sos_room")
             applied = True
+            logger.info(
+                "SOS triggered (offline sync): user=%s queue_id=%s",
+                hash_identifier(current_user.email), queue_id,
+            )
 
         conn.execute(
             "UPDATE offline_queue SET synced = 1, synced_at = ? WHERE id = ?",
@@ -1247,7 +1688,7 @@ def sync_offline_actions():
 # ---------------------------------------------------------------------------
 @socketio.on("connect")
 def handle_connect():
-    print(f"Client connected: {request.sid}")
+    logger.info("Client connected: sid=%s", request.sid)
     if current_user.is_authenticated:
         join_room(f"user_{current_user.id}")
         join_room("sos_room")
@@ -1255,7 +1696,7 @@ def handle_connect():
 
 @socketio.on("disconnect")
 def handle_disconnect():
-    print(f"Client disconnected: {request.sid}")
+    logger.info("Client disconnected: sid=%s", request.sid)
 
 
 @socketio.on("subscribe_to_alerts")
@@ -1267,34 +1708,58 @@ def handle_subscribe_alerts():
 
 
 # ---------------------------------------------------------------------------
-# TIER 2 FEATURE: Live location tracking — WebSocket side
+# TIER 3 FEATURE: Live tracking authorization + WebSocket location updates
 # ---------------------------------------------------------------------------
+
 @socketio.on("join_tracking")
 def handle_join_tracking(data):
-    """A viewer (e.g. someone with the Bubble/guardian map open) asks to
-    watch a given user's live location. NOTE: this project's `contacts`
-    table stores emergency-contact phone numbers, not linked app accounts,
-    so there's no first-class "is this viewer an authorized contact of
-    that user" check yet — anyone logged in can currently join any
-    tracking room they know the user_id for. If contacts get their own
-    app accounts later, add a permission check here before join_room().
-    """
     if not current_user.is_authenticated:
+        emit("tracking_denied", {"reason": "not_authenticated"})
         return
-    target_user_id = data.get("user_id")
-    if target_user_id:
-        join_room(f"tracking_{target_user_id}")
-        emit("joined_tracking", {"user_id": target_user_id})
+
+    target_user_id = (data or {}).get("user_id")
+
+    try:
+        target_user_id = int(target_user_id)
+    except (TypeError, ValueError):
+        emit("tracking_denied", {"reason": "invalid_user_id"})
+        return
+
+    conn = get_db()
+    try:
+        if not is_accepted_linked_contact(conn, target_user_id, current_user.id):
+            emit(
+                "tracking_denied",
+                {"reason": "not_authorized", "user_id": target_user_id}
+            )
+            return
+    finally:
+        conn.close()
+
+    join_room(f"tracking_{target_user_id}")
+    emit("tracking_joined", {"user_id": target_user_id})
+
+
+@socketio.on("leave_tracking")
+def handle_leave_tracking(data):
+    target_user_id = (data or {}).get("user_id")
+
+    try:
+        target_user_id = int(target_user_id)
+    except (TypeError, ValueError):
+        return
+
+    leave_room(f"tracking_{target_user_id}")
 
 
 @socketio.on("location_update")
 def handle_location_update(data):
-    """Received every ~10s from a client with active tracking on."""
     if not current_user.is_authenticated:
         return
 
     lat = data.get("latitude")
     lng = data.get("longitude")
+
     if lat is None or lng is None:
         return
 
@@ -1308,15 +1773,19 @@ def handle_location_update(data):
     conn.commit()
     conn.close()
 
-    socketio.emit("contact_location_update", {
-        "user_id": current_user.id,
-        "latitude": lat,
-        "longitude": lng,
-        "timestamp": timestamp,
-    }, room=f"tracking_{current_user.id}")
+    socketio.emit(
+        "contact_location_update",
+        {
+            "user_id": current_user.id,
+            "latitude": lat,
+            "longitude": lng,
+            "timestamp": timestamp,
+        },
+        room=f"tracking_{current_user.id}",
+    )
 
-    # Continuously check risk on every update, same ML pipeline as one-time shares
     check_location_risk_internal(lat, lng, current_user.id)
+
 
 
 @app.route("/api/test-notification", methods=["POST"])
@@ -1330,6 +1799,10 @@ def test_notification():
 
 
 if __name__ == "__main__":
-    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    os.makedirs(os.path.dirname(app.config["DATABASE_PATH"]) or ".", exist_ok=True)
     init_db()
-    socketio.run(app, debug=True, host="127.0.0.1", port=5000)
+    logger.info(
+        "Starting SafeHer (env=%s, debug=%s, host=%s, port=%s)",
+        app.config.get("ENV_NAME", "unknown"), app.config["DEBUG"], app.config["HOST"], app.config["PORT"],
+    )
+    socketio.run(app, debug=app.config["DEBUG"], host=app.config["HOST"], port=app.config["PORT"])

@@ -1117,8 +1117,13 @@ const sendInviteBtn = document.getElementById("sendInviteBtn");
 const incomingInvitesList = document.getElementById("incomingInvitesList");
 const canTrackMeList = document.getElementById("canTrackMeList");
 const trackableSelect = document.getElementById("trackableSelect");
+<<<<<<< HEAD
 const bubbleViewBtn = document.getElementById("bubbleViewBtn");
 const bubbleStopViewBtn = document.getElementById("bubbleStopViewBtn");
+=======
+const startTrackingBtn = document.getElementById("startTrackingBtn");
+const stopTrackingBtn = document.getElementById("stopTrackingBtn");
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
 
 let currentlyTrackingUserId = null;
 let trackedMarker = null;
@@ -1152,7 +1157,11 @@ async function loadLinkedContacts() {
   trackableSelect.innerHTML = accepted.length
     ? accepted.map((r) => `<option value="${r.owner_user_id}">${r.owner_email}</option>`).join("")
     : `<option value="">No accepted Bubble members yet</option>`;
+<<<<<<< HEAD
   bubbleViewBtn.disabled = accepted.length === 0;
+=======
+  startTrackingBtn.disabled = accepted.length === 0;
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
 }
 
 window.respondToInvite = async (inviteId, accept) => {
@@ -1177,16 +1186,28 @@ sendInviteBtn?.addEventListener("click", async () => {
   }
 });
 
+<<<<<<< HEAD
 bubbleViewBtn?.addEventListener("click", () => {
+=======
+startTrackingBtn?.addEventListener("click", () => {
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
   const targetUserId = parseInt(trackableSelect.value, 10);
   if (!targetUserId) return;
   currentlyTrackingUserId = targetUserId;
   socket.emit("join_tracking", { user_id: targetUserId });
+<<<<<<< HEAD
   bubbleViewBtn.classList.add("hidden");
   bubbleStopViewBtn.classList.remove("hidden");
 });
 
 bubbleStopViewBtn?.addEventListener("click", () => {
+=======
+  startTrackingBtn.classList.add("hidden");
+  stopTrackingBtn.classList.remove("hidden");
+});
+
+stopTrackingBtn?.addEventListener("click", () => {
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
   stopTrackingUI();
 });
 
@@ -1199,8 +1220,13 @@ function stopTrackingUI() {
     bubbleMap.removeLayer(trackedMarker);
     trackedMarker = null;
   }
+<<<<<<< HEAD
   bubbleViewBtn?.classList.remove("hidden");
   bubbleStopViewBtn?.classList.add("hidden");
+=======
+  startTrackingBtn?.classList.remove("hidden");
+  stopTrackingBtn?.classList.add("hidden");
+>>>>>>> 5563081d87a0314af447d482db736edde085e10c
 }
 
 function updateTrackedLocationOnMap(data) {

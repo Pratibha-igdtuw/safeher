@@ -47,8 +47,14 @@ def db_path(tmp_path):
 @pytest.fixture
 def client(db_path, monkeypatch):
     """A Flask test client backed by a fresh, isolated temp SQLite DB."""
+
     monkeypatch.setattr(app_module, "DB_PATH", db_path)
-    app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+
+    app_module.app.config["DATABASE_PATH"] = db_path
+    app_module.app.config["TESTING"] = True
+    app_module.app.config["SECRET_KEY"] = "test-secret"
+    app_module.app.config["WTF_CSRF_ENABLED"] = False
+
     app_module.init_db()
 
     with app_module.app.test_client() as c:
