@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SafeHer — AI Guardian for Women's Safety</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+<!-- FEATURE 4: WebSocket for real-time notifications -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+<!-- TIER 1 FEATURE 1: TensorFlow.js — used client-side only to capture mic
+     audio and compute a log-mel spectrogram; the actual YAMNet inference
+     runs server-side in /api/audio-classify (see static/js/main.js and
+     utils/audio_classifier.py). Loaded lazily; main.js works fine (via the
+     transcript-keyword path) even if this CDN is unreachable. -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-icon">🛡️</span>
+    <span class="brand-name">SafeHer</span>
+  </div>
+  <p class="tagline">AI Guardian for Women's Safety</p>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="home">Home</button>
+    <button class="tab-btn" data-tab="map">Safety Map</button>
+    <button class="tab-btn" data-tab="directory">Directory</button>
+    <button class="tab-btn" data-tab="guardian">Guardian</button>
+    <button class="tab-btn" data-tab="community">Community</button>
+    {% if is_admin %}
+    <a href="/admin" style="color:white; text-decoration:none; padding:8px 12px; margin-left:auto; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; hover:background:rgba(255,255,255,0.1);">📊 Admin</a>
+    {% endif %}
+    <a href="/logout" style="color:white; text-decoration:none; padding:8px 12px; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; margin-left:8px;">Logout</a>
+  </nav>
+</header>
+
+<!-- ============================= HOME TAB ============================= -->
+<main id="tab-home" class="grid tab-panel">
+
+  <section class="card sos-card">
+    <h2>Emergency SOS</h2>
+    <p class="muted">One tap sends your live location + alert to all trusted contacts.</p>
+    <button id="sosBtn" class="sos-button">SOS</button>
+    <p id="sosStatus" class="status-line"></p>
+  </section>
+
+  <section class="card">
+    <h2>Fake Call</h2>
+    <p class="muted">Trigger a realistic incoming call to exit an uncomfortable situation.</p>
+    <div class="row">
+      <select id="fakeCallDelay">
+        <option value="0">Now</option>
+        <option value="5">In 5 sec</option>
+        <option value="15">In 15 sec</option>
+        <option value="30">In 30 sec</option>
+      </select>
+      <button id="fakeCallBtn" class="btn">Schedule Fake Call</button>
+    </div>
+    <p id="fakeCallStatus" class="status-line"></p>
+  </section>
+
+  <section class="card">
+    <h2>Voice Distress Detection</h2>
+    <p class="muted">Speak, or type what would be transcribed. The AI model scans for distress patterns.</p>
+    <div class="row">
+      <button id="listenBtn" class="btn">🎙️ Start Listening</button>
+      <button id="stopListenBtn" class="btn secondary" disabled>Stop</button>
+    </div>
+    <textarea id="transcriptBox" placeholder="Live transcript appears here... (or type to simulate)"></textarea>
+    <button id="analyzeBtn" class="btn">Analyze Transcript</button>
+    <p id="distressResult" class="status-line"></p>
+
+    <hr class="divider" />
+    <p class="muted">
+      Real audio ML monitoring: captures raw mic audio, computes a
+      log-mel spectrogram in-browser, and sends it to the server for
+      YAMNet-based scream/alarm classification (no audio ever leaves your
+      device — only the spectrogram does).
+    </p>
+    <div class="row">
+      <button id="audioMlBtn" class="btn">🔊 Start Audio ML Monitoring</button>
+      <button id="stopAudioMlBtn" class="btn secondary" disabled>Stop</button>
+    </div>
+    <p id="audioMlResult" class="status-line"></p>
+  </section>
+
+  <section class="card">
+    <h2>Safe Check-in Timer</h2>
+    <p class="muted">Set a timer. If you don't check in before it ends, contacts get alerted automatically.</p>
+    <div class="row">
+      <input id="checkinMinutes" type="number" min="1" value="1" />
+      <span class="muted">minutes</span>
+      <button id="startCheckinBtn" class="btn">Start Timer</button>
+    </div>
+    <p id="checkinTimer" class="status-line big-timer"></p>
+    <button id="confirmSafeBtn" class="btn safe-btn" disabled>I'm Safe ✔</button>
+  </section>
+
+  <section class="card">
+    <h2>Anonymous Record</h2>
+    <p class="muted">Silently capture audio evidence — no alert is sent to anyone, nothing leaves your device.</p>
+    <div class="row">
+      <button id="recordBtn" class="btn">⏺ Start Recording</button>
+      <button id="stopRecordBtn" class="btn secondary" disabled>■ Stop</button>
+    </div>
+    <p id="recordStatus" class="status-line"></p>
+    <audio id="recordPlayback" controls class="hidden" style="width:100%; margin-top:8px;"></audio>
+    <a id="downloadRecordingLink" class="hidden" download="safeher-recording.webm">Download recording</a>
+  </section>
+
+  <section class="card">
+    <h2>Recent Alerts</h2>
+    <ul id="alertsList" class="alerts-list"></ul>
+  </section>
+
+</main>
+
+<!-- ============================= MAP TAB ============================= -->
+<main id="tab-map" class="tab-panel hidden">
+  <div class="map-layout">
+
+    <div class="map-side card">
+      <h2>Safety Score Map</h2>
+      <p class="muted">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits.</p>
+
+      <div class="legend">
+        <span><i class="dot green"></i> Safe (75+)</span>
+        <span><i class="dot orange"></i> Caution (45–74)</span>
+        <span><i class="dot red"></i> High Risk (&lt;45)</span>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <input id="originInput" type="text" placeholder="From" />
+        <input id="destInput" type="text" placeholder="To" />
+      </div>
+      <button id="routeCheckBtn" class="btn">Check Route Score</button>
+      <div id="routeResult" class="route-result"></div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="leafletMap"></div>
+    </div>
+  </div>
+</main>
+
+<!-- AUDIT MODAL -->
+<div id="auditModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <h2>Safety Audit</h2>
+    <p class="muted">Rate this spot on 6 quick parameters (0 = poor, 4 = excellent) — SafetiPin's audit model.</p>
+    <input id="auditAreaName" type="text" placeholder="Area name (optional)" />
+
+    <div class="audit-sliders">
+      <label>Lighting <input type="range" min="0" max="4" value="2" id="s_lighting" /></label>
+      <label>Openness <input type="range" min="0" max="4" value="2" id="s_openness" /></label>
+      <label>Walkpath condition <input type="range" min="0" max="4" value="2" id="s_walkpath" /></label>
+      <label>Security presence <input type="range" min="0" max="4" value="2" id="s_security" /></label>
+      <label>Public transport access <input type="range" min="0" max="4" value="2" id="s_transport" /></label>
+      <label>Crowd / people density <input type="range" min="0" max="4" value="2" id="s_crowd" /></label>
+    </div>
+
+    <textarea id="auditComment" placeholder="Anything else to note? (optional)"></textarea>
+
+    <div class="row">
+      <button id="submitAuditBtn" class="btn safe-btn">Submit Audit</button>
+      <button id="cancelAuditBtn" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= DIRECTORY TAB ============================= -->
+<main id="tab-directory" class="tab-panel hidden">
+  <section class="card">
+    <h2>Nearby Safety Services</h2>
+    <p class="muted">Police stations, hospitals, pharmacies, and helplines closest to you.</p>
+    <div class="row">
+      <button class="btn filter-btn active" data-type="">All</button>
+      <button class="btn filter-btn" data-type="police">Police</button>
+      <button class="btn filter-btn" data-type="hospital">Hospital</button>
+      <button class="btn filter-btn" data-type="pharmacy">Pharmacy</button>
+      <button class="btn filter-btn" data-type="helpline">Helpline</button>
+    </div>
+    <ul id="servicesList" class="services-list"></ul>
+  </section>
+</main>
+
+<!-- ============================= GUARDIAN TAB ============================= -->
+<main id="tab-guardian" class="tab-panel hidden">
+  <div class="map-layout">
+    <div class="map-side card">
+      <h2>Bubble</h2>
+      <p class="muted">Your private circle — like I'M SAFE's Bubble. Everyone in it can see your live location on one map when sharing is on.</p>
+
+      <button id="shareLocationBtn" class="btn safe-btn">Start Sharing</button>
+      <button id="stopSharingBtn" class="btn secondary hidden">Stop Sharing</button>
+
+      <div class="row" style="margin-top:10px">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+          <input type="checkbox" id="privateModeToggle" style="flex:none; width:auto;" />
+          Private Mode (pause without ending session)
+        </label>
+      </div>
+      <p id="guardianStatus" class="status-line"></p>
+
+      <h2 style="margin-top:20px">Trusted Contacts</h2>
+      <div class="row">
+        <input id="contactName" type="text" placeholder="Name" />
+        <input id="contactPhone" type="text" placeholder="Phone" />
+        <input id="contactRelation" type="text" placeholder="Relation" />
+        <button id="addContactBtn" class="btn">Add</button>
+      </div>
+      <ul id="contactsList" class="contacts-list"></ul>
+    </div>
+
+    <div class="map-wrap">
+      <div id="bubbleMap"></div>
+    </div>
+  </div>
+</main>
+
+<!-- ============================= COMMUNITY TAB ============================= -->
+<main id="tab-community" class="tab-panel hidden">
+  <section class="card">
+    <h2>Community Safety Feed</h2>
+    <p class="muted">Share and see real-time safety alerts and safe-spot tips from people nearby — like I'M SAFE's Community Feed.</p>
+
+    <div class="row">
+      <select id="feedPostType">
+        <option value="alert">⚠️ Alert</option>
+        <option value="safe_spot">✅ Safe Spot</option>
+        <option value="incident">🚨 Incident Report</option>
+      </select>
+      <input id="feedAreaName" type="text" placeholder="Area (optional)" />
+    </div>
+    <textarea id="feedMessage" placeholder="What's happening? e.g. 'Streetlight out near the metro exit'"></textarea>
+    <button id="postFeedBtn" class="btn safe-btn">Post to Feed</button>
+
+    <ul id="feedList" class="alerts-list" style="margin-top:16px; max-height:420px;"></ul>
+  </section>
+</main>
+
+<!-- FAKE CALL OVERLAY -->
+<div id="fakeCallOverlay" class="fake-call-overlay hidden">
+  <div class="fake-call-screen">
+    <p class="caller-label">Incoming call</p>
+    <h1 id="callerName">Mom</h1>
+    <p class="ringing">ringing...</p>
+    <div class="call-actions">
+      <button id="declineCallBtn" class="call-btn decline">✕</button>
+      <button id="acceptCallBtn" class="call-btn accept">✓</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

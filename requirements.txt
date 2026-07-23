@@ -1,0 +1,26 @@
+Flask>=3.0.0
+Flask-SocketIO>=5.0.0
+python-socketio>=5.0.0
+python-engineio>=4.0.0
+Flask-Login>=0.6.0
+Werkzeug>=2.0.0
+
+# --- Tier 1: real audio ML (Feature 1) -------------------------------------
+# Loading tensorflow_hub's YAMNet requires outbound network access to
+# tfhub.dev on first run (weights are cached locally after that). If these
+# aren't installed, utils/audio_classifier.py degrades to a documented
+# heuristic fallback instead of failing — see that file's module docstring.
+tensorflow>=2.15.0
+tensorflow-hub>=0.15.0
+numpy>=1.24.0
+
+# --- Tier 1: ML risk prediction (Feature 2 enhanced) -----------------------
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Optional — only needed if you switch MOCK_MODE = False in utils/alerts.py
+# to send real SMS via Twilio:
+# twilio>=8.0.0
+
+# Optional — for email notifications (Feature 4: Real-time contact notifications)
+# Flask-Mail>=0.9.0

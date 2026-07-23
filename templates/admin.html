@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SafeHer Admin — Analytics Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.css" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f6f7;
+      color: #333;
+    }
+
+    header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    header h1 {
+      font-size: 28px;
+      margin-bottom: 4px;
+    }
+
+    header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .logout-btn {
+      position: absolute;
+      top: 24px;
+      right: 24px;
+      padding: 8px 16px;
+      background: rgba(255, 255, 255, 0.2);
+      color: white;
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .logout-btn:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+      border-left: 4px solid #667eea;
+    }
+
+    .stat-card.risk {
+      border-left-color: #ff4757;
+    }
+
+    .stat-card.warning {
+      border-left-color: #ffb020;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 32px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .stat-subtext {
+      font-size: 12px;
+      color: #888;
+      margin-top: 8px;
+    }
+
+    .section {
+      background: white;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    }
+
+    .section h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+      color: #333;
+    }
+
+    .map-wrap {
+      height: 500px;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+
+    #analyticsMap {
+      width: 100%;
+      height: 100%;
+    }
+
+    .high-risk-zones {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .zone-item {
+      padding: 12px;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .zone-item:last-child {
+      border-bottom: none;
+    }
+
+    .zone-score {
+      background: #ff4757;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .timeline {
+      display: flex;
+      gap: 16px;
+      height: 200px;
+      align-items: flex-end;
+      padding: 16px 0;
+    }
+
+    .timeline-bar {
+      flex: 1;
+      background: linear-gradient(to top, #667eea, #764ba2);
+      border-radius: 4px 4px 0 0;
+      min-height: 20px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      color: white;
+      font-size: 12px;
+      font-weight: 600;
+      position: relative;
+    }
+
+    .timeline-bar-label {
+      position: absolute;
+      bottom: -24px;
+      font-size: 11px;
+      color: #888;
+      white-space: nowrap;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #888;
+    }
+
+    .spinner {
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid #667eea;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .legend-color {
+      width: 16px;
+      height: 16px;
+      border-radius: 2px;
+    }
+
+    .legend-green {
+      background: #2dd4bf;
+    }
+
+    .legend-orange {
+      background: #ffb020;
+    }
+
+    .legend-red {
+      background: #ff4757;
+    }
+
+    .alert-note {
+      background: #fffae5;
+      border-left: 4px solid #ffc107;
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: #856404;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🛡️ SafeHer Admin Dashboard</h1>
+  <p>City-scale safety analytics, audit heatmaps, and risk monitoring</p>
+  <a href="/logout" class="logout-btn">Logout</a>
+</header>
+
+<div class="container">
+
+  <!-- Statistics Grid -->
+  <div class="grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Audits</div>
+      <div class="stat-value" id="totalAudits">—</div>
+      <div class="stat-subtext">Safety assessments recorded</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">Average Safety Score</div>
+      <div class="stat-value" id="avgScore">—</div>
+      <div class="stat-subtext">City-wide average (0-100)</div>
+    </div>
+
+    <div class="stat-card risk">
+      <div class="stat-label">High-Risk Zones</div>
+      <div class="stat-value" id="highRiskCount">—</div>
+      <div class="stat-subtext">Areas with score &lt; 45</div>
+    </div>
+
+    <div class="stat-card warning">
+      <div class="stat-label">Risk Alerts Triggered</div>
+      <div class="stat-value" id="riskAlertsCount">—</div>
+      <div class="stat-subtext">Proactive user warnings (Feature 2)</div>
+    </div>
+  </div>
+
+  <!-- Heatmap Section -->
+  <div class="section">
+    <h2>📍 Safety Score Heatmap</h2>
+    <div class="alert-note">
+      🔥 Heatmap visualization: Green = Safe (75+), Orange = Caution (45-74), Red = High Risk (&lt;45). 
+      Based on crowd-sourced safety audits across all users.
+    </div>
+    <div class="map-wrap">
+      <div id="analyticsMap"></div>
+    </div>
+  </div>
+
+  <!-- Two-column layout for zones and timeline -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+
+    <!-- High-Risk Zones -->
+    <div class="section">
+      <h2>⚠️ Top Unsafe Zones</h2>
+      <div class="high-risk-zones" id="highRiskZones">
+        <div class="loading"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- Alerts Timeline -->
+    <div class="section">
+      <h2>📈 Alerts (Last 7 Days)</h2>
+      <div class="timeline" id="alertsTimeline">
+        <div class="loading"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+<script>
+  let analyticsMap = null;
+
+  async function loadAnalytics() {
+    try {
+      const res = await fetch("/api/admin/analytics", {
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        if (res.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+        throw new Error("Failed to load analytics");
+      }
+
+      const data = await res.json();
+
+      // Update stats
+      document.getElementById("totalAudits").textContent = data.total_audits;
+      document.getElementById("avgScore").textContent = data.avg_safety_score;
+      document.getElementById("highRiskCount").textContent = data.high_risk_zones.count;
+      document.getElementById("riskAlertsCount").textContent = data.risk_alerts_triggered;
+
+      // Render high-risk zones
+      renderHighRiskZones(data.high_risk_zones);
+
+      // Render timeline
+      renderAlertsTimeline(data.alerts_timeline);
+
+      // Render heatmap
+      renderHeatmap(data.audits_for_map);
+    } catch (err) {
+      console.error("Error loading analytics:", err);
+      alert("Failed to load analytics: " + err.message);
+    }
+  }
+
+  function renderHighRiskZones(zones) {
+    const container = document.getElementById("highRiskZones");
+    if (zones.zones.length === 0) {
+      container.innerHTML = '<div style="padding:16px; text-align:center; color:#888; font-size:13px;">No high-risk zones recorded yet</div>';
+      return;
+    }
+
+    container.innerHTML = zones.zones
+      .map(
+        ([name, score]) =>
+          `<div class="zone-item">
+        <span>${name || "Unnamed Area"}</span>
+        <span class="zone-score">${Math.round(score)}/100</span>
+      </div>`
+      )
+      .join("");
+  }
+
+  function renderAlertsTimeline(timeline) {
+    const container = document.getElementById("alertsTimeline");
+    if (timeline.length === 0) {
+      container.innerHTML =
+        '<div style="width:100%; text-align:center; color:#888; font-size:13px;">No alerts in the last 7 days</div>';
+      return;
+    }
+
+    const maxCount = Math.max(...timeline.map((t) => t[1]), 1);
+    const html = timeline
+      .map(
+        ([date, count]) =>
+          `<div class="timeline-bar" style="height: ${(count / maxCount) * 100}%">
+        <span>${count}</span>
+        <div class="timeline-bar-label">${date}</div>
+      </div>`
+      )
+      .join("");
+    container.innerHTML = html;
+  }
+
+  function renderHeatmap(audits) {
+    // Initialize map if not already done
+    if (!analyticsMap) {
+      analyticsMap = L.map("analyticsMap").setView([28.7041, 77.1025], 12); // Default: Delhi
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
+        maxZoom: 19,
+      }).addTo(analyticsMap);
+    }
+
+    // Create heatmap layer with audit locations and intensities based on score
+    const heatData = audits.map((audit) => [
+      audit.latitude,
+      audit.longitude,
+      (audit.overall_score / 100) * 0.8 + 0.2, // Normalize to 0-1 range
+    ]);
+
+    if (heatData.length > 0) {
+      L.heatLayer(heatData, {
+        radius: 25,
+        blur: 15,
+        max: 1,
+        gradient: {
+          0.0: "#ff4757", // Red (high risk)
+          0.5: "#ffb020", // Orange (caution)
+          1.0: "#2dd4bf", // Cyan (safe)
+        },
+      }).addTo(analyticsMap);
+    }
+
+    // Fit bounds to audits
+    if (audits.length > 0) {
+      const bounds = L.latLngBounds(audits.map((a) => [a.latitude, a.longitude]));
+      analyticsMap.fitBounds(bounds, { padding: [50, 50] });
+    }
+  }
+
+  // Load on page load
+  window.addEventListener("load", loadAnalytics);
+
+  // Refresh every 30 seconds
+  setInterval(loadAnalytics, 30000);
+</script>
+
+</body>
+</html>

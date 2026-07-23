@@ -1,0 +1,44 @@
+name: SafeHer Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CI runners often can't reach tfhub.dev for real YAMNet weights,
+          # so skip tensorflow/tensorflow-hub here — utils/audio_classifier.py
+          # degrades to its documented heuristic fallback, and the test
+          # suite exercises both code paths deliberately.
+          grep -v -E "^(tensorflow|tensorflow-hub)" requirements.txt > requirements-ci.txt
+          grep -v -E "^-r requirements.txt$" requirements-dev.txt >> requirements-ci.txt
+          pip install -r requirements-ci.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=app --cov=utils --cov-report=term-missing --cov-report=xml --cov-fail-under=80 -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml

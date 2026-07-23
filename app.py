@@ -1,0 +1,983 @@
+"""
+SafeHer v2 - AI Guardian for Women's Safety
+Hackathon Prototype (Flask backend + WebSocket + Admin Analytics)
+
+FEATURES ADDED:
+1. REAL AI-BASED DISTRESS DETECTION (audio classification via TensorFlow.js)
+2. PREDICTIVE RISK ALERT (proactive warnings for low-safety areas)
+3. MULTI-USER LOGIN/ACCOUNTS (email+password signup/login, session-based)
+4. REAL-TIME CONTACT NOTIFICATION (WebSocket push instead of polling)
+5. ANALYTICS DASHBOARD (admin heatmap view of all audits + stats)
+
+Run:
+    pip install -r requirements.txt
+    python app.py
+
+Then open http://127.0.0.1:5000 in your browser.
+"""
+
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import sqlite3
+import os
+import math
+
+from utils.alerts import send_sos_alert
+from utils.route_safety import get_route_safety_score
+from utils.distress_detector import check_distress
+from utils.safety_services import get_nearby_services
+from utils.audio_classifier import classify_audio_payload
+from utils.risk_predictor import get_predictor
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "data", "safeher.db")
+
+app = Flask(__name__)
+app.secret_key = "safeher-secret-key-change-in-production"
+socketio = SocketIO(app, cors_allowed_origins="*")
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+
+# ---------------------------------------------------------------------------
+# User model for Flask-Login
+# ---------------------------------------------------------------------------
+class User(UserMixin):
+    def __init__(self, user_id, email, is_admin=False):
+        self.id = user_id
+        self.email = email
+        self.is_admin = is_admin
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    conn = get_db()
+    row = conn.execute("SELECT id, email, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return User(row["id"], row["email"], row["is_admin"])
+
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            relation TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            trigger_type TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            message TEXT,
+            alert_type TEXT DEFAULT 'sos',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            deadline TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            area_name TEXT,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            lighting INTEGER,
+            openness INTEGER,
+            walkpath INTEGER,
+            security INTEGER,
+            transport INTEGER,
+            crowd INTEGER,
+            overall_score INTEGER,
+            comment TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS guardian_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            active INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS feed_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message TEXT NOT NULL,
+            post_type TEXT NOT NULL DEFAULT 'alert',
+            latitude REAL,
+            longitude REAL,
+            area_name TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS risk_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            risk_score REAL,
+            nearby_low_score_area TEXT,
+            dismissed INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+    conn.commit()
+
+    # --- Migration: add ML prediction columns to risk_alerts if missing ---
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(risk_alerts)")}
+    if "prediction_score" not in existing_cols:
+        conn.execute("ALTER TABLE risk_alerts ADD COLUMN prediction_score REAL")
+    if "prediction_confidence" not in existing_cols:
+        conn.execute("ALTER TABLE risk_alerts ADD COLUMN prediction_confidence REAL")
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Auth Routes
+# ---------------------------------------------------------------------------
+@app.route("/")
+def index():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+    return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        data = request.get_json(force=True)
+        email = data.get("email", "").strip().lower()
+        password = data.get("password", "")
+
+        if not email or not password:
+            return jsonify({"error": "email and password required"}), 400
+
+        conn = get_db()
+        user_row = conn.execute("SELECT id, email, password_hash, is_admin FROM users WHERE email = ?", (email,)).fetchone()
+        conn.close()
+
+        if user_row and check_password_hash(user_row["password_hash"], password):
+            user = User(user_row["id"], user_row["email"], user_row["is_admin"])
+            login_user(user)
+            return jsonify({"status": "logged_in", "is_admin": user.is_admin})
+        else:
+            return jsonify({"error": "invalid email or password"}), 401
+
+    return render_template("login.html")
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if request.method == "POST":
+        data = request.get_json(force=True)
+        email = data.get("email", "").strip().lower()
+        password = data.get("password", "")
+
+        if not email or not password:
+            return jsonify({"error": "email and password required"}), 400
+
+        conn = get_db()
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({"error": "email already exists"}), 409
+
+        password_hash = generate_password_hash(password)
+        cur = conn.execute(
+            "INSERT INTO users (email, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
+            (email, password_hash, 0, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        user_id = cur.lastrowid
+        conn.close()
+
+        user = User(user_id, email, False)
+        login_user(user)
+        return jsonify({"status": "signed_up", "is_admin": False})
+
+    return render_template("signup.html")
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return render_template("index.html", is_admin=current_user.is_admin)
+
+
+# ---------------------------------------------------------------------------
+# Admin Dashboard
+# ---------------------------------------------------------------------------
+@app.route("/admin")
+@login_required
+def admin_dashboard():
+    if not current_user.is_admin:
+        return jsonify({"error": "unauthorized"}), 403
+    return render_template("admin.html")
+
+
+@app.route("/api/admin/analytics")
+@login_required
+def admin_analytics():
+    """
+    Return analytics data for admin dashboard:
+    - all audits with coords (for heatmap)
+    - total audits, avg safety score
+    - alerts timeline
+    - most unsafe zones
+    """
+    if not current_user.is_admin:
+        return jsonify({"error": "unauthorized"}), 403
+
+    conn = get_db()
+
+    # All audits for heatmap
+    audits = conn.execute("SELECT * FROM audits ORDER BY created_at DESC").fetchall()
+    audits_list = [dict(a) for a in audits]
+
+    # Stats
+    total_audits = len(audits_list)
+    avg_score = round(sum([a["overall_score"] for a in audits_list]) / total_audits) if total_audits > 0 else 0
+
+    # High-risk zones (score < 45)
+    high_risk = [a for a in audits_list if a["overall_score"] < 45]
+    high_risk_summary = {
+        "count": len(high_risk),
+        "zones": sorted(
+            [(a["area_name"], a["overall_score"]) for a in high_risk],
+            key=lambda x: x[1]
+        )[:10]  # top 10 worst
+    }
+
+    # Alerts over time (last 7 days)
+    seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    alerts = conn.execute(
+        "SELECT DATE(created_at) as date, COUNT(*) as count FROM alerts WHERE created_at > ? GROUP BY date ORDER BY date",
+        (seven_days_ago,)
+    ).fetchall()
+    alerts_timeline = [(dict(a)["date"], dict(a)["count"]) for a in alerts]
+
+    # Risk alerts triggered (Feature 2)
+    risk_alerts = conn.execute("SELECT COUNT(*) as count FROM risk_alerts").fetchone()
+    risk_alerts_count = dict(risk_alerts)["count"] if risk_alerts else 0
+
+    conn.close()
+
+    return jsonify({
+        "total_audits": total_audits,
+        "avg_safety_score": avg_score,
+        "high_risk_zones": high_risk_summary,
+        "audits_for_map": audits_list,
+        "alerts_timeline": alerts_timeline,
+        "risk_alerts_triggered": risk_alerts_count,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Trusted contacts (user-specific)
+# ---------------------------------------------------------------------------
+@app.route("/api/contacts", methods=["GET"])
+@login_required
+def list_contacts():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM contacts WHERE user_id = ? ORDER BY id DESC",
+        (current_user.id,)
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/contacts", methods=["POST"])
+@login_required
+def add_contact():
+    data = request.get_json(force=True)
+    name = data.get("name", "").strip()
+    phone = data.get("phone", "").strip()
+    relation = data.get("relation", "").strip()
+
+    if not name or not phone:
+        return jsonify({"error": "name and phone are required"}), 400
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO contacts (user_id, name, phone, relation, created_at) VALUES (?, ?, ?, ?, ?)",
+        (current_user.id, name, phone, relation, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "added"}), 201
+
+
+@app.route("/api/contacts/<int:contact_id>", methods=["DELETE"])
+@login_required
+def delete_contact(contact_id):
+    conn = get_db()
+    # Verify ownership
+    contact = conn.execute(
+        "SELECT user_id FROM contacts WHERE id = ?",
+        (contact_id,)
+    ).fetchone()
+    if not contact or contact["user_id"] != current_user.id:
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
+    conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "deleted"})
+
+
+# ---------------------------------------------------------------------------
+# SOS (with WebSocket real-time notification)
+# ---------------------------------------------------------------------------
+@app.route("/api/sos", methods=["POST"])
+@login_required
+def trigger_sos():
+    data = request.get_json(force=True)
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+    trigger_type = data.get("trigger_type", "manual")
+
+    conn = get_db()
+    contacts = conn.execute("SELECT * FROM contacts WHERE user_id = ?", (current_user.id,)).fetchall()
+
+    message = (
+        f"SOS ALERT ({trigger_type}) - {current_user.email} needs help. "
+        f"Location: https://maps.google.com/?q={lat},{lng}"
+    )
+
+    delivery_results = send_sos_alert(contacts, message)
+
+    conn.execute(
+        "INSERT INTO alerts (user_id, trigger_type, latitude, longitude, message, alert_type, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (current_user.id, trigger_type, lat, lng, message, "sos", datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    # ===== FEATURE 4: WebSocket real-time notification =====
+    socketio.emit("sos_triggered", {
+        "user_email": current_user.email,
+        "location": {"latitude": lat, "longitude": lng},
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat(),
+    }, room="sos_room")
+
+    return jsonify(
+        {
+            "status": "alert_sent",
+            "contacts_notified": len(contacts),
+            "delivery": delivery_results,
+            "message": message,
+        }
+    )
+
+
+@app.route("/api/alerts", methods=["GET"])
+@login_required
+def list_alerts():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM alerts WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+        (current_user.id,)
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
+# FEATURE 1: Distress detection (transcript + ML fallback)
+# ---------------------------------------------------------------------------
+@app.route("/api/distress-check", methods=["POST"])
+@login_required
+def distress_check():
+    """
+    FEATURE 1: REAL AI-BASED DISTRESS DETECTION
+    
+    Browser uses TensorFlow.js + YAMNet to detect audio distress.
+    This endpoint acts as keyword-match fallback if ML inference fails.
+    """
+    data = request.get_json(force=True)
+    transcript = data.get("transcript", "")
+    result = check_distress(transcript)
+    
+    if result.get("auto_trigger_sos"):
+        loc = data.get("location", {})
+        if loc.get("latitude") and loc.get("longitude"):
+            trigger_sos_internal(current_user.id, loc["latitude"], loc["longitude"], "audio_ml")
+    
+    return jsonify(result)
+
+
+@app.route("/api/audio-classify", methods=["POST"])
+@login_required
+def audio_classify():
+    """
+    TIER 1 FEATURE 1: Real audio ML deployment.
+
+    Accepts a browser-computed log-mel spectrogram (preferred) or raw
+    waveform, runs YAMNet inference (or the documented heuristic fallback
+    when TensorFlow/the YAMNet weights aren't available — see
+    utils/audio_classifier.py for details), and auto-triggers SOS above
+    the confidence threshold.
+    """
+    data = request.get_json(force=True)
+    result = classify_audio_payload(data)
+
+    if result.get("auto_trigger_sos"):
+        loc = data.get("location", {})
+        if loc.get("latitude") and loc.get("longitude"):
+            trigger_sos_internal(current_user.id, loc["latitude"], loc["longitude"], "audio_ml_deployed")
+    elif result.get("distress_detected"):
+        # Log even when below the auto-trigger threshold, for the admin
+        # analytics dashboard, without firing a full SOS.
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO alerts (user_id, trigger_type, latitude, longitude, message, alert_type, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                current_user.id,
+                "audio_ml_deployed",
+                data.get("location", {}).get("latitude"),
+                data.get("location", {}).get("longitude"),
+                f"Possible distress audio detected ({result.get('distress_type')}, "
+                f"confidence {result.get('confidence')}) — below auto-SOS threshold.",
+                "audio_flag",
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    return jsonify(result)
+
+
+def trigger_sos_internal(user_id, lat, lng, trigger_type):
+    """Internal SOS trigger without full request context"""
+    conn = get_db()
+    contacts = conn.execute("SELECT * FROM contacts WHERE user_id = ?", (user_id,)).fetchall()
+    
+    user_email = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()["email"]
+    message = (
+        f"SOS ALERT ({trigger_type}) - {user_email} needs help. "
+        f"Location: https://maps.google.com/?q={lat},{lng}"
+    )
+    
+    send_sos_alert(contacts, message)
+    
+    conn.execute(
+        "INSERT INTO alerts (user_id, trigger_type, latitude, longitude, message, alert_type, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, trigger_type, lat, lng, message, "sos", datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Route safety scoring
+# ---------------------------------------------------------------------------
+@app.route("/api/route-safety", methods=["POST"])
+@login_required
+def route_safety():
+    data = request.get_json(force=True)
+    origin = data.get("origin", "")
+    destination = data.get("destination", "")
+    result = get_route_safety_score(origin, destination)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Safe check-in timer (user-specific)
+# ---------------------------------------------------------------------------
+@app.route("/api/checkin/start", methods=["POST"])
+@login_required
+def start_checkin():
+    data = request.get_json(force=True)
+    minutes = int(data.get("minutes", 15))
+    deadline = datetime.utcnow() + timedelta(minutes=minutes)
+
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO checkins (user_id, deadline, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (current_user.id, deadline.isoformat(), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    checkin_id = cur.lastrowid
+    conn.close()
+
+    return jsonify({"checkin_id": checkin_id, "deadline": deadline.isoformat()})
+
+
+@app.route("/api/checkin/<int:checkin_id>/confirm", methods=["POST"])
+@login_required
+def confirm_checkin(checkin_id):
+    conn = get_db()
+    checkin = conn.execute("SELECT user_id FROM checkins WHERE id = ?", (checkin_id,)).fetchone()
+    if not checkin or checkin["user_id"] != current_user.id:
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
+    conn.execute("UPDATE checkins SET status = 'safe' WHERE id = ?", (checkin_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "safe"})
+
+
+@app.route("/api/checkin/<int:checkin_id>/status", methods=["GET"])
+@login_required
+def checkin_status(checkin_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM checkins WHERE id = ?", (checkin_id,)).fetchone()
+    if not row or row["user_id"] != current_user.id:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    result = dict(row)
+    deadline = datetime.fromisoformat(result["deadline"])
+    result["expired"] = datetime.utcnow() > deadline and result["status"] == "pending"
+    
+    if result["expired"]:
+        conn.close()
+        trigger_sos_internal(current_user.id, None, None, "checkin_timeout")
+        return jsonify(result)
+    
+    conn.close()
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Safety Audit + Predictive Risk Alert
+# ---------------------------------------------------------------------------
+@app.route("/api/audits", methods=["GET"])
+@login_required
+def list_audits():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM audits ORDER BY id DESC LIMIT 200").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/audits", methods=["POST"])
+@login_required
+def add_audit():
+    data = request.get_json(force=True)
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+    if lat is None or lng is None:
+        return jsonify({"error": "latitude and longitude are required"}), 400
+
+    params = ["lighting", "openness", "walkpath", "security", "transport", "crowd"]
+    values = {p: int(data.get(p, 2)) for p in params}
+    overall_score = round(sum(values.values()) / (len(params) * 4) * 100)
+
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO audits
+           (user_id, area_name, latitude, longitude, lighting, openness, walkpath, security,
+            transport, crowd, overall_score, comment, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            current_user.id,
+            data.get("area_name", "").strip() or "Unnamed area",
+            lat,
+            lng,
+            values["lighting"],
+            values["openness"],
+            values["walkpath"],
+            values["security"],
+            values["transport"],
+            values["crowd"],
+            overall_score,
+            data.get("comment", "").strip(),
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "added", "overall_score": overall_score}), 201
+
+
+# ---------------------------------------------------------------------------
+# FEATURE 2: Predictive Risk Alert (proactive low-safety area warning)
+# ---------------------------------------------------------------------------
+@app.route("/api/check-location-risk", methods=["POST"])
+@login_required
+def check_location_risk():
+    """
+    TIER 1 FEATURE 2 ENHANCEMENT: ML-powered risk prediction.
+
+    Replaces the pure "within 500m of a low-score audit" geofence rule
+    with a RandomForest-based continuous risk_score (0-100) built from
+    location, time-of-day, nearby audit density/severity, nearby active
+    user density, and recency of nearby incidents. The original geofence
+    signal is still computed and folded in as one of the model's input
+    features (nearby_audits_count / avg_nearby_score), so this is a
+    strict enhancement rather than a replacement of that logic.
+    """
+    data = request.get_json(force=True)
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+
+    if lat is None or lng is None:
+        return jsonify({"error": "latitude and longitude required"}), 400
+
+    conn = get_db()
+    prediction, nearest_threat, threat_distance = _predict_location_risk(conn, lat, lng)
+
+    risk_score = prediction["risk_score"]
+    risk_detected = risk_score >= 45  # keep the existing "Caution" cutoff for the boolean flag
+
+    if risk_detected:
+        conn.execute(
+            """INSERT INTO risk_alerts
+               (user_id, latitude, longitude, risk_score, nearby_low_score_area,
+                prediction_score, prediction_confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                current_user.id,
+                lat,
+                lng,
+                nearest_threat["overall_score"] if nearest_threat else None,
+                nearest_threat["area_name"] if nearest_threat else None,
+                prediction["risk_score"],
+                prediction["confidence"],
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+
+        socketio.emit("risk_alert", {
+            "message": f"⚠️ Elevated risk near your location (ML risk score: {risk_score:.0f}/100)",
+            "area": nearest_threat["area_name"] if nearest_threat else None,
+            "score": nearest_threat["overall_score"] if nearest_threat else None,
+            "distance_km": round(threat_distance, 2) if nearest_threat else None,
+            "risk_score": risk_score,
+            "recommendation": prediction["factors"]["recommendation"],
+        }, room=f"user_{current_user.id}")
+
+    if risk_score > 60:
+        socketio.emit("ml_risk_alert", {
+            "risk_score": risk_score,
+            "confidence": prediction["confidence"],
+            "engine": prediction["engine"],
+            "factors": prediction["factors"],
+            "location": {"latitude": lat, "longitude": lng},
+            "timestamp": datetime.utcnow().isoformat(),
+        }, room=f"user_{current_user.id}")
+
+    conn.close()
+
+    return jsonify({
+        "risk_detected": risk_detected,
+        "risk_score": risk_score,
+        "confidence": prediction["confidence"],
+        "engine": prediction["engine"],
+        "factors": prediction["factors"],
+        "area": nearest_threat["area_name"] if nearest_threat else None,
+        "score": nearest_threat["overall_score"] if nearest_threat else None,
+        "distance_km": round(threat_distance, 2) if nearest_threat else None,
+    })
+
+
+def _predict_location_risk(conn, lat, lng, user_id_for_density=None):
+    """Shared helper: builds ML features from the DB and runs the risk
+    predictor. Returns (prediction_dict, nearest_low_score_audit_or_None, distance_km)."""
+    # Broad candidate radius (~1km via lat/lng box) fetched once, then
+    # precisely filtered by haversine distance inside build_features /
+    # for the legacy nearest-threat display.
+    candidate_audits = conn.execute(
+        "SELECT * FROM audits WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?",
+        (lat - 0.01, lat + 0.01, lng - 0.01, lng + 0.01),
+    ).fetchall()
+    candidate_audits = [dict(a) for a in candidate_audits]
+
+    low_score_nearby = [a for a in candidate_audits if a["overall_score"] < 45]
+    nearest_threat = None
+    threat_distance = float("inf")
+    for audit in low_score_nearby:
+        dist = haversine_distance(lat, lng, audit["latitude"], audit["longitude"])
+        if dist <= 0.5 and dist < threat_distance:
+            threat_distance = dist
+            nearest_threat = audit
+
+    one_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    active_shares = conn.execute(
+        "SELECT latitude, longitude FROM guardian_shares WHERE active = 1 AND updated_at > ?",
+        (one_hour_ago,),
+    ).fetchall()
+    user_density = sum(
+        1 for s in active_shares
+        if s["latitude"] is not None and haversine_distance(lat, lng, s["latitude"], s["longitude"]) <= 0.5
+    )
+
+    recent_alert = conn.execute(
+        "SELECT created_at FROM alerts WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (lat - 0.01, lat + 0.01, lng - 0.01, lng + 0.01),
+    ).fetchone()
+    if recent_alert:
+        delta = datetime.utcnow() - datetime.fromisoformat(recent_alert["created_at"])
+        hours_since_incident = delta.total_seconds() / 3600.0
+    else:
+        hours_since_incident = 999
+
+    predictor = get_predictor()
+    features = predictor.build_features(
+        lat, lng, datetime.utcnow(), candidate_audits,
+        nearby_user_count=user_density, hours_since_incident=hours_since_incident,
+    )
+    prediction = predictor.predict(features)
+    return prediction, nearest_threat, threat_distance
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance in km between coordinates"""
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+
+# ---------------------------------------------------------------------------
+# Nearby safety services directory
+# ---------------------------------------------------------------------------
+@app.route("/api/nearby-services", methods=["GET"])
+@login_required
+def nearby_services():
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    service_type = request.args.get("type") or None
+    results = get_nearby_services(lat, lng, service_type=service_type)
+    return jsonify(results)
+
+
+# ---------------------------------------------------------------------------
+# Guardian live location sharing (user-specific)
+# ---------------------------------------------------------------------------
+@app.route("/api/guardian/share", methods=["POST"])
+@login_required
+def guardian_share():
+    data = request.get_json(force=True)
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+
+    conn = get_db()
+    conn.execute("UPDATE guardian_shares SET active = 0 WHERE user_id = ? AND active = 1", (current_user.id,))
+    conn.execute(
+        "INSERT INTO guardian_shares (user_id, latitude, longitude, active, updated_at) VALUES (?, ?, ?, 1, ?)",
+        (current_user.id, lat, lng, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    # ===== FEATURE 2 INTEGRATION: Check for risk when sharing =====
+    check_location_risk_internal(lat, lng, current_user.id)
+
+    return jsonify({"status": "sharing"})
+
+
+def check_location_risk_internal(lat, lng, user_id):
+    """Internal version for risk check (used by guardian_share), now backed
+    by the same ML risk predictor as /api/check-location-risk."""
+    if lat is None or lng is None:
+        return
+
+    conn = get_db()
+    prediction, nearest_threat, _ = _predict_location_risk(conn, lat, lng)
+
+    if prediction["risk_score"] >= 45:
+        conn.execute(
+            """INSERT INTO risk_alerts
+               (user_id, latitude, longitude, risk_score, nearby_low_score_area,
+                prediction_score, prediction_confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,
+                lat,
+                lng,
+                nearest_threat["overall_score"] if nearest_threat else None,
+                nearest_threat["area_name"] if nearest_threat else None,
+                prediction["risk_score"],
+                prediction["confidence"],
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+
+        if prediction["risk_score"] > 60:
+            socketio.emit("ml_risk_alert", {
+                "risk_score": prediction["risk_score"],
+                "confidence": prediction["confidence"],
+                "engine": prediction["engine"],
+                "factors": prediction["factors"],
+                "location": {"latitude": lat, "longitude": lng},
+                "timestamp": datetime.utcnow().isoformat(),
+            }, room=f"user_{user_id}")
+
+    conn.close()
+
+
+@app.route("/api/guardian/stop", methods=["POST"])
+@login_required
+def guardian_stop():
+    conn = get_db()
+    conn.execute("UPDATE guardian_shares SET active = 0 WHERE user_id = ? AND active = 1", (current_user.id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "stopped"})
+
+
+@app.route("/api/guardian/status", methods=["GET"])
+@login_required
+def guardian_status():
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM guardian_shares WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+        (current_user.id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"active": False})
+    return jsonify({**dict(row), "active": True})
+
+
+# ---------------------------------------------------------------------------
+# Community Safety Feed (user-specific)
+# ---------------------------------------------------------------------------
+@app.route("/api/feed", methods=["GET"])
+@login_required
+def list_feed():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM feed_posts ORDER BY id DESC LIMIT 100").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/feed", methods=["POST"])
+@login_required
+def add_feed_post():
+    data = request.get_json(force=True)
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    post_type = data.get("post_type", "alert")
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO feed_posts (user_id, message, post_type, latitude, longitude, area_name, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            current_user.id,
+            message,
+            post_type,
+            data.get("latitude"),
+            data.get("longitude"),
+            data.get("area_name", "").strip(),
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "posted"}), 201
+
+
+# ---------------------------------------------------------------------------
+# FEATURE 4: WebSocket Real-Time Notifications
+# ---------------------------------------------------------------------------
+@socketio.on("connect")
+def handle_connect():
+    print(f"Client connected: {request.sid}")
+    if current_user.is_authenticated:
+        join_room(f"user_{current_user.id}")
+        join_room("sos_room")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    print(f"Client disconnected: {request.sid}")
+
+
+@socketio.on("subscribe_to_alerts")
+def handle_subscribe_alerts():
+    """Subscribe to real-time alert updates"""
+    if current_user.is_authenticated:
+        join_room(f"user_alerts_{current_user.id}")
+        emit("subscribed", {"status": "listening for alerts"})
+
+
+@app.route("/api/test-notification", methods=["POST"])
+@login_required
+def test_notification():
+    socketio.emit("test_alert", {
+        "message": "This is a test real-time notification!",
+        "timestamp": datetime.utcnow().isoformat(),
+    }, room=f"user_{current_user.id}")
+    return jsonify({"status": "notification_sent"})
+
+
+if __name__ == "__main__":
+    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    init_db()
+    socketio.run(app, debug=True, host="127.0.0.1", port=5000)
