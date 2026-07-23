@@ -27,6 +27,21 @@ import math
 import io
 import base64
 import json
+import hashlib
+import logging
+from logging.handlers import RotatingFileHandler
+
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load environment variables from a local .env file (if present) BEFORE
+# config.py is imported below — config.py's Config classes read
+# os.environ at import/class-definition time, so .env has to be loaded
+# first or those values never make it in. No-op in environments (CI, prod
+# containers) where real environment variables are already set some other
+# way.
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # --- Tier 2: 2FA -------------------------------------------------------
 import pyotp
@@ -39,15 +54,85 @@ from utils.safety_services import get_nearby_services
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "safeher.db")
+from config import get_config
 
 app = Flask(__name__)
-app.secret_key = "safeher-secret-key-change-in-production"
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config.from_object(get_config())
+
+DB_PATH = app.config["DATABASE_PATH"]  # kept for any code/tests referencing DB_PATH directly
+
+socketio = SocketIO(app, cors_allowed_origins=app.config["CORS_ORIGINS"])
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+
+# ---------------------------------------------------------------------------
+# Structured logging (console + rotating file handler)
+# ---------------------------------------------------------------------------
+def configure_logging(flask_app):
+    """INFO for normal request/connect events, WARNING for failed logins
+    and invalid 2FA codes, ERROR for unhandled exceptions. Every SOS
+    trigger, failed login attempt, and 2FA failure is logged with a
+    timestamp + hashed user identifier — the audit trail a real safety
+    app needs."""
+    log_dir = flask_app.config["LOG_DIR"]
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_level = getattr(logging, str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(), logging.INFO)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+    )
+
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "app.log"),
+        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
+        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Avoid duplicate handlers if configure_logging() runs more than once
+    # (e.g. re-imported by tests).
+    root_logger.handlers = [file_handler, console_handler]
+
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.handlers = [file_handler, console_handler]
+    werkzeug_logger.setLevel(log_level)
+
+    return logging.getLogger("safeher")
+
+
+logger = configure_logging(app)
+
+
+def hash_identifier(value):
+    """One-way hash of an identifying value (email, user id) for audit
+    logs, so log files don't contain raw PII while still letting the same
+    user's events be correlated across log lines."""
+    if value is None:
+        return "unknown"
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(exc):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        # Let Flask's normal handling deal with expected HTTP errors
+        # (404s, etc.) instead of logging them as unhandled crashes.
+        return exc
+
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.path, exc, exc_info=True)
+    return jsonify({"error": "internal server error"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +159,28 @@ def load_user(user_id):
 # Database helpers
 # ---------------------------------------------------------------------------
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    """Open a SQLite connection configured for concurrent web-app usage.
+
+    Two things make "database is locked" errors much rarer under
+    concurrent writes (e.g. simultaneous SOS + location-history inserts):
+    - WAL mode lets readers and a writer proceed concurrently instead of
+      sqlite3's default behavior of blocking all readers during a write.
+    - A busy timeout makes SQLite retry for a bit instead of immediately
+      raising `sqlite3.OperationalError: database is locked` when it does
+      hit contention.
+
+    Reads DATABASE_PATH from app.config so DATABASE_URL (see config.py /
+    .env.example) controls where the file lives.
+    """
+    db_path = app.config.get("DATABASE_PATH", DB_PATH)
+    timeout_s = app.config.get("DB_CONNECT_TIMEOUT_S", 10)
+    busy_timeout_ms = app.config.get("DB_BUSY_TIMEOUT_MS", 5000)
+
+    conn = sqlite3.connect(db_path, timeout=timeout_s)
     conn.row_factory = sqlite3.Row
+    if db_path != ":memory:":
+        conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     return conn
 
 
@@ -257,12 +362,15 @@ def login():
                 # Password is correct, but TOTP code still required.
                 # Stash the user id in session; nothing is logged in yet.
                 session["pending_2fa_user_id"] = user_row["id"]
+                logger.info("Password verified, awaiting 2FA code: user=%s", hash_identifier(email))
                 return jsonify({"status": "2fa_required"})
 
             user = User(user_row["id"], user_row["email"], user_row["is_admin"])
             login_user(user)
+            logger.info("Successful login: user=%s", hash_identifier(email))
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
         else:
+            logger.warning("Failed login attempt: user=%s", hash_identifier(email))
             return jsonify({"error": "invalid email or password"}), 401
 
     return render_template("login.html")
@@ -366,11 +474,13 @@ def enable_2fa_confirm():
     totp = pyotp.TOTP(row["totp_secret"])
     if not totp.verify(code, valid_window=1):
         conn.close()
+        logger.warning("Invalid 2FA setup code: user=%s", hash_identifier(current_user.email))
         return jsonify({"error": "invalid code"}), 401
 
     conn.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (current_user.id,))
     conn.commit()
     conn.close()
+    logger.info("2FA enabled: user=%s", hash_identifier(current_user.email))
     return jsonify({"status": "2fa_enabled"})
 
 
@@ -385,6 +495,7 @@ def disable_2fa():
 
     if not row or not check_password_hash(row["password_hash"], password):
         conn.close()
+        logger.warning("Failed 2FA-disable attempt (wrong password): user=%s", hash_identifier(current_user.email))
         return jsonify({"error": "incorrect password"}), 401
 
     if row["is_admin"]:
@@ -419,9 +530,11 @@ def verify_2fa_login():
 
     totp = pyotp.TOTP(user_row["totp_secret"])
     if not totp.verify(code, valid_window=1):
+        logger.warning("Invalid 2FA login code: user=%s", hash_identifier(user_row["email"]))
         return jsonify({"error": "invalid or expired code"}), 401
 
     session.pop("pending_2fa_user_id", None)
+    logger.info("Successful 2FA login: user=%s", hash_identifier(user_row["email"]))
     user = User(user_row["id"], user_row["email"], user_row["is_admin"])
     login_user(user)
     return jsonify({"status": "logged_in", "is_admin": user.is_admin})
@@ -595,6 +708,11 @@ def trigger_sos():
     conn.commit()
     conn.close()
 
+    logger.info(
+        "SOS triggered: user=%s trigger_type=%s contacts_notified=%d",
+        hash_identifier(current_user.email), trigger_type, len(contacts),
+    )
+
     # ===== FEATURE 4: WebSocket real-time notification =====
     socketio.emit("sos_triggered", {
         "user_email": current_user.email,
@@ -712,6 +830,11 @@ def trigger_sos_internal(user_id, lat, lng, trigger_type):
     )
     conn.commit()
     conn.close()
+
+    logger.info(
+        "SOS triggered (internal): user=%s trigger_type=%s contacts_notified=%d",
+        hash_identifier(user_email), trigger_type, len(contacts),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1230,6 +1353,10 @@ def sync_offline_actions():
                 "longitude": lng,
             }, room="sos_room")
             applied = True
+            logger.info(
+                "SOS triggered (offline sync): user=%s queue_id=%s",
+                hash_identifier(current_user.email), queue_id,
+            )
 
         conn.execute(
             "UPDATE offline_queue SET synced = 1, synced_at = ? WHERE id = ?",
@@ -1247,7 +1374,7 @@ def sync_offline_actions():
 # ---------------------------------------------------------------------------
 @socketio.on("connect")
 def handle_connect():
-    print(f"Client connected: {request.sid}")
+    logger.info("Client connected: sid=%s", request.sid)
     if current_user.is_authenticated:
         join_room(f"user_{current_user.id}")
         join_room("sos_room")
@@ -1255,7 +1382,7 @@ def handle_connect():
 
 @socketio.on("disconnect")
 def handle_disconnect():
-    print(f"Client disconnected: {request.sid}")
+    logger.info("Client disconnected: sid=%s", request.sid)
 
 
 @socketio.on("subscribe_to_alerts")
@@ -1330,6 +1457,10 @@ def test_notification():
 
 
 if __name__ == "__main__":
-    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    os.makedirs(os.path.dirname(app.config["DATABASE_PATH"]) or ".", exist_ok=True)
     init_db()
-    socketio.run(app, debug=True, host="127.0.0.1", port=5000)
+    logger.info(
+        "Starting SafeHer (env=%s, debug=%s, host=%s, port=%s)",
+        app.config.get("ENV_NAME", "unknown"), app.config["DEBUG"], app.config["HOST"], app.config["PORT"],
+    )
+    socketio.run(app, debug=app.config["DEBUG"], host=app.config["HOST"], port=app.config["PORT"])

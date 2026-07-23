@@ -5,6 +5,11 @@ python-engineio>=4.0.0
 Flask-Login>=0.6.0
 Werkzeug>=2.0.0
 
+# --- Tier 3 Part 2: Infrastructure & Reliability ---------------------------
+# Loads SECRET_KEY / DATABASE_URL / DEBUG / CORS_ORIGINS / etc. from a local
+# .env file at startup (see config.py + .env.example).
+python-dotenv>=1.0.0
+
 # --- Tier 1: real audio ML (Feature 1) -------------------------------------
 # Loading tensorflow_hub's YAMNet requires outbound network access to
 # tfhub.dev on first run (weights are cached locally after that). If these
