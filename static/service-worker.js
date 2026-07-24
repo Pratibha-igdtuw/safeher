@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // SafeHer Service Worker — offline-first shell caching + SOS action queue
 // ---------------------------------------------------------------------------
-const CACHE_NAME = "safeher-shell-v2";
+const CACHE_NAME = "safeher-shell-v4";
 const OFFLINE_URL = "/offline";
 
 // Everything needed to render the app shell without a network connection.

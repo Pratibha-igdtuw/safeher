@@ -50,9 +50,66 @@ body {
   background-attachment: fixed;
 }
 
+/* Ambient drifting glow blobs — subtle "living" premium background,
+   purely decorative, sit behind everything, never intercept clicks. */
+body::before, body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(60px);
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+body::before {
+  width: 420px;
+  height: 420px;
+  top: -120px;
+  left: -100px;
+  background: radial-gradient(circle, rgba(139,92,246,0.35), transparent 70%);
+  animation: blob-drift-1 22s ease-in-out infinite;
+}
+
+body::after {
+  width: 480px;
+  height: 480px;
+  bottom: -160px;
+  right: -140px;
+  background: radial-gradient(circle, rgba(8,145,178,0.28), transparent 70%);
+  animation: blob-drift-2 26s ease-in-out infinite;
+}
+
+@keyframes blob-drift-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(60px, 40px) scale(1.15); }
+}
+
+@keyframes blob-drift-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(-50px, -30px) scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after { animation: none; }
+}
+
 ::selection { background: var(--violet); color: white; }
 
 a { color: var(--cyan); }
+
+/* ---------------- Scroll progress bar ---------------- */
+.scroll-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 0%;
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+  box-shadow: 0 0 12px rgba(124,58,237,0.5);
+  z-index: 100;
+  transition: width 0.1s ease-out;
+}
 
 /* focus visibility, kept accessible under the glass aesthetic */
 button:focus-visible, input:focus-visible, textarea:focus-visible,
@@ -170,22 +227,68 @@ select:focus-visible, a:focus-visible {
 .hero-video-frame {
   position: relative;
   width: 100%;
-  height: clamp(260px, 42vw, 560px);
+  /* Sized off BOTH viewport width and height, so it always fits the
+     screen properly instead of overflowing/cropping on short or very
+     wide windows. */
+  height: clamp(220px, min(44vw, 60vh), 560px);
   overflow: hidden;
   background: linear-gradient(160deg, #d9c9ff, var(--violet) 55%, var(--violet-2) 100%);
 }
 
 .hero-video-frame video {
   position: absolute;
-  inset: 0;
+  /* Only a small vertical buffer (for the scroll parallax nudge below) —
+     no horizontal overscan and no extra zoom, so the full frame of the
+     video stays visible instead of being cropped in. */
+  left: 0;
+  right: 0;
+  top: -4%;
   width: 100%;
-  height: 100%;
+  height: 108%;
   object-fit: cover;
+  object-position: center 32%;
   display: block;
+  transform: translateY(0px);
+  transition: transform 0.05s linear;
+  will-change: transform;
+}
+
+/* Soft cinematic blend from the video into the card section below,
+   instead of a hard cut. */
+.hero-video-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 82%, rgba(246,242,253,0.9) 100%);
+  pointer-events: none;
 }
 
 @media (max-width: 800px) {
-  .hero-video-frame { height: 260px; }
+  .hero-video-frame { height: clamp(200px, min(58vw, 42vh), 320px); }
+}
+
+/* Landscape / desktop: the frame becomes far wider-and-shorter than the
+   video's native ~1.77:1 ratio. `fill` stretches the video to exactly
+   match the frame on both axes — full width AND full height, no gradient
+   showing through on the sides, and (unlike `cover`) nothing cropped off
+   the top, so the subject's head stays fully visible too. The stretch is
+   mild at the sizes this frame actually renders at. Mobile portrait (the
+   default rules above) is untouched. */
+@media (min-width: 801px), (orientation: landscape) {
+  .hero-video-frame {
+    height: clamp(240px, min(56vw, 62vh), 640px);
+  }
+
+  .hero-video-frame video {
+    top: 0;
+    height: 100%;
+    object-fit: fill;
+    object-position: center center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-video-frame video { transform: none !important; }
 }
 
 /* ---------------- Card grid + 3D scroll-reveal cards ---------------- */
@@ -741,3 +844,242 @@ textarea {
   border-color: var(--violet);
   box-shadow: var(--depth-1);
 }
+
+/* =========================================================================
+   Premium pass — floating quick-SOS, trust strip, skeletons, list reveal,
+   tab transitions, toasts, scrollbars, sliders, button depth.
+   ========================================================================= */
+
+/* ---------------- Floating Quick-SOS (PPT: "Always on, bottom right") --
+   Additive shortcut only — the original SOS card keeps its exact original
+   position/behavior; this just makes SOS reachable from any tab/scroll
+   position without duplicating any logic (it forwards to the real button). */
+.quick-sos-btn {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 90;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  border: none;
+  color: white;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  background: radial-gradient(circle at 34% 30%, #ff8fa3, var(--coral) 55%, #b91c3c 100%);
+  box-shadow: 0 14px 30px -10px rgba(244,63,94,0.6), 0 0 0 6px rgba(244,63,94,0.12);
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease, box-shadow 0.2s ease;
+  animation: radar-pulse 2.4s infinite;
+}
+
+.quick-sos-btn:hover { transform: scale(1.08) translateY(-2px); }
+.quick-sos-btn:active { transform: scale(0.95); }
+
+.quick-sos-btn.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.6);
+}
+
+@media (max-width: 600px) {
+  .quick-sos-btn { right: 16px; bottom: 16px; width: 54px; height: 54px; font-size: 11px; }
+}
+
+/* ---------------- Trust strip (live, real data only) ---------------- */
+.trust-strip {
+  max-width: 1150px;
+  margin: -28px auto 0;
+  position: relative;
+  z-index: 3;
+  padding: 0 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.trust-strip-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid rgba(255,255,255,0.7);
+  border-radius: 999px;
+  padding: 10px 12px;
+  box-shadow: var(--depth-2);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.trust-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.trust-pill .dot {
+  width: 7px; height: 7px; margin: 0;
+}
+
+.trust-pill strong {
+  font-family: 'Space Grotesk', sans-serif;
+  color: var(--violet-2);
+  font-size: 13px;
+}
+
+.trust-pill + .trust-pill { border-left: 1px solid var(--border); padding-left: 16px; }
+
+@media (max-width: 700px) {
+  .trust-strip { margin-top: -20px; }
+  .trust-strip-inner { border-radius: var(--r-lg); justify-content: center; }
+}
+
+/* ---------------- Tab-panel entrance (replays automatically whenever
+   main.js flips display:none -> visible, no main.js changes needed) ------ */
+.tab-panel {
+  animation: panel-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------- Skeleton loaders ---------------- */
+.skeleton-item {
+  height: 44px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(100deg, rgba(124,58,237,0.06) 30%, rgba(124,58,237,0.14) 50%, rgba(124,58,237,0.06) 70%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Friendly empty state once skeletons are replaced by a genuinely empty
+   list — pure CSS, only shows when there are zero child nodes. */
+.contacts-list:empty::after,
+.alerts-list:empty::after,
+.services-list:empty::after {
+  content: "Nothing here yet.";
+  display: block;
+  padding: 14px 4px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-item { animation: none; }
+}
+
+/* ---------------- Staggered list-item reveal (applied by
+   premium-enhancements.js via MutationObserver when main.js injects
+   fresh <li> data — purely visual, no data logic duplicated) ---------- */
+.li-enter {
+  animation: li-enter-anim 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes li-enter-anim {
+  from { opacity: 0; transform: translateY(10px) rotateX(-6deg); }
+  to   { opacity: 1; transform: translateY(0) rotateX(0deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .li-enter { animation: none; }
+}
+
+/* ---------------- Premium toast/notification restyle ----------------
+   Higher specificity (.notification.notification-x) than main.js's own
+   injected <style> block so this wins the cascade without touching main.js. */
+.notification.notification-critical,
+.notification.notification-warning,
+.notification.notification-info {
+  border-radius: var(--r-md) !important;
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid rgba(255,255,255,0.35) !important;
+  box-shadow: var(--depth-2) !important;
+  font-family: 'Inter', sans-serif;
+}
+
+.notification.notification-critical { background: linear-gradient(135deg, #fb7185, var(--coral)) !important; }
+.notification.notification-warning  { background: linear-gradient(135deg, #fbbf24, var(--warn)) !important; }
+.notification.notification-info     { background: linear-gradient(135deg, #a78bfa, var(--violet-2)) !important; }
+
+/* ---------------- Custom scrollbars ---------------- */
+.contacts-list, .alerts-list, .services-list, .map-side {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124,58,237,0.35) transparent;
+}
+
+.contacts-list::-webkit-scrollbar, .alerts-list::-webkit-scrollbar,
+.services-list::-webkit-scrollbar, .map-side::-webkit-scrollbar { width: 7px; }
+
+.contacts-list::-webkit-scrollbar-thumb, .alerts-list::-webkit-scrollbar-thumb,
+.services-list::-webkit-scrollbar-thumb, .map-side::-webkit-scrollbar-thumb {
+  background: rgba(124,58,237,0.3);
+  border-radius: 999px;
+}
+
+.contacts-list::-webkit-scrollbar-thumb:hover, .alerts-list::-webkit-scrollbar-thumb:hover,
+.services-list::-webkit-scrollbar-thumb:hover, .map-side::-webkit-scrollbar-thumb:hover {
+  background: rgba(124,58,237,0.55);
+}
+
+/* ---------------- Range slider (audit modal) premium styling ---------------- */
+.audit-sliders input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+  outline: none;
+}
+
+.audit-sliders input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 3px solid var(--violet);
+  box-shadow: 0 4px 10px -2px rgba(124,58,237,0.5);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.audit-sliders input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+
+.audit-sliders input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 3px solid var(--violet);
+  box-shadow: 0 4px 10px -2px rgba(124,58,237,0.5);
+  cursor: pointer;
+}
+
+/* ---------------- Premium button press depth (layered on top of the
+   existing .btn / .sos-button rules already defined above) ------------- */
+.btn:active:not(:disabled), .safe-btn:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.5) inset, 0 2px 6px -2px rgba(88,44,166,0.3);
+}
+
+.card-icon { transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.card:hover .card-icon { transform: translateY(-2px) rotateZ(-4deg) scale(1.06); }
