@@ -82,3 +82,54 @@ self.addEventListener("fetch", (event) => {
   // (window 'offline' event + queued fetch wrapper) is what handles it,
   // not the service worker.
 });
+
+// ---------------------------------------------------------------------------
+// TIER 3 PART 3: Real Web Push — shows a native OS notification even when
+// every SafeHer tab is closed. The server (utils/push.py via app.py) sends
+// a JSON payload through pywebpush on SOS / high-risk-area / check-in-
+// expiry events; this is what turns that payload into a visible alert.
+// ---------------------------------------------------------------------------
+self.addEventListener("push", (event) => {
+  let payload = { title: "SafeHer alert", body: "You have a new safety alert.", url: "/" };
+
+  if (event.data) {
+    try {
+      payload = { ...payload, ...event.data.json() };
+    } catch (err) {
+      // Non-JSON push payload (shouldn't happen from our own server, but
+      // don't let a malformed payload crash the push handler).
+      payload.body = event.data.text() || payload.body;
+    }
+  }
+
+  const options = {
+    body: payload.body,
+    icon: "/static/icons/icon-192.png",
+    badge: "/static/icons/icon-192.png",
+    tag: payload.tag || "safeher-alert",
+    data: { url: payload.url || "/" },
+    requireInteraction: payload.critical === true,
+  };
+
+  event.waitUntil(self.registration.showNotification(payload.title, options));
+});
+
+// Clicking the native notification focuses an existing SafeHer tab if one
+// is open, otherwise opens a new one.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || "/";
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+    })
+  );
+});

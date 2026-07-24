@@ -46,7 +46,36 @@
 
 * { box-sizing: border-box; }
 
+<<<<<<< HEAD
 html { scroll-behavior: smooth; }
+=======
+/* ---------------------------------------------------------------------
+   Accessibility: visible keyboard focus outline.
+   A CSS reset elsewhere in this file removes default browser outlines
+   on several interactive elements — this restores a clearly visible
+   focus ring for keyboard users without changing the mouse/touch look.
+   ------------------------------------------------------------------- */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--safe);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Fallback for browsers without :focus-visible support */
+a:focus,
+button:focus,
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 3px solid var(--safe);
+  outline-offset: 2px;
+}
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 body {
   margin: 0;
@@ -682,6 +711,23 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
 
 .hidden { display: none !important; }
 
+<<<<<<< HEAD
+=======
+/* Visually hidden but still announced by screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Offline banner (Tier 2: offline-first PWA) */
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 .offline-banner {
   position: fixed; top: 0; left: 0; right: 0;
   background: var(--danger); color: white;
@@ -689,6 +735,7 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
   padding: 8px; z-index: 9999;
 }
 
+<<<<<<< HEAD
 .admin-nav-link {
   color: var(--text);
   text-decoration: none;
@@ -713,3 +760,20 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
 .notification.notification-critical { background: var(--danger) !important; }
 .notification.notification-warning { background: var(--warning) !important; }
 .notification.notification-info { background: var(--primary) !important; }
+=======
+/* Admin navigation link */
+.admin-nav-link {
+  color: white;
+  text-decoration: none;
+  padding: 8px 12px;
+  margin-left: auto;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 4px;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.admin-nav-link:hover {
+  background: rgba(255,255,255,0.1);
+}
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)

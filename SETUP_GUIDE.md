@@ -1,110 +1,159 @@
-# SafeHer v2 — Quick Setup Guide
+# SafeHer — Setup Guide
 
-## ⚡ 5-minute setup
+Covers install, environment variables, a full demo walkthrough (Tier 1 +
+Tier 2 + Tier 3 features), database management, accessibility testing, and
+troubleshooting. For a feature overview and known limitations, see
+[README.md](README.md).
 
-### 1. Install dependencies
+## 1. Install & run
+
 ```bash
-cd safeher_enhanced
+git clone <this repo>
+cd safeher
 pip install -r requirements.txt
-```
-
-### 2. Run the server
-```bash
 python app.py
 ```
 
-Server starts at `http://127.0.0.1:5000`
+Server starts at `http://127.0.0.1:5000`. Open it in **Chrome** for the
+best support of Web Speech (recognition + synthesis), Web Audio, and Web
+Push.
 
-### 3. First access
-- Browser redirects to `/login` (no auth required yet)
-- Click "Sign up" → Create account with email + password
-- Dashboard opens automatically after signup
+First visit redirects to `/login` → click "Sign up" → create an account
+with email + password. No demo/seed accounts are pre-created.
 
----
+Optional (for local development, linting, and the test suite):
+```bash
+pip install -r requirements-dev.txt
+```
 
-## 🎯 Demo walkthrough (for judges)
+## 2. Environment variables
 
-### Setup: Create 2 accounts
+Copy `.env.example` to `.env` and fill in real values before deploying
+anywhere besides your own machine:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FLASK_ENV` | `development` | `production` turns on secure-only cookies, HSTS, and force-HTTPS. Leave as `development` for local `http://` testing. |
+| `SECRET_KEY` | placeholder | Signs session cookies. Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `CORS_ALLOWED_ORIGINS` | `http://127.0.0.1:5000,http://localhost:5000` | Comma-separated list of origins allowed to open a Socket.IO connection. |
+| `RATELIMIT_STORAGE_URI` | `memory://` | Rate-limit counter storage. Point at Redis (`redis://host:6379/0`) for any multi-worker deployment — `memory://` does **not** share state across workers. |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | unset | Only needed if you flip `MOCK_MODE = False` in `utils/alerts.py` to send real SMS. |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | unset | Web Push signing keypair. Without these, push silently no-ops (see below) — every other feature keeps working. |
+| `VAPID_CLAIM_EMAIL` | `mailto:admin@example.com` | Contact address push services may surface if they ever flag abusive send volume. Doesn't need to be a real inbox to function. |
+
+## 3. Push notifications
+
+Real Web Push (native OS notifications, delivered even when every SafeHer
+tab is closed) needs a VAPID keypair. Generate one:
+
+```bash
+pip install py-vapid
+python -c "from py_vapid import Vapid; v = Vapid(); v.generate_keys(); print('PUBLIC:', v.public_key); print('PRIVATE:', v.private_key)"
+```
+
+or with the `vapid` CLI that ships with `py-vapid`:
+
+```bash
+vapid --gen
+```
+
+Put the resulting values in `.env` as `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`,
+restart the server, then in the app:
+
+1. Go to the **Home** tab.
+2. Under "Push Notifications", click **Enable Push Notifications** and
+   accept the browser's permission prompt.
+3. Trigger an SOS, a high-risk-area detection, or let a check-in timer
+   expire — a native notification should appear even if you switch away
+   from the tab (try closing it entirely to confirm).
+
+If `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` aren't set, `GET
+/api/push/vapid-public-key` returns a `503 push_not_configured` and the
+Home-tab button will show that push isn't configured — nothing else in the
+app is affected.
+
+## 4. Demo walkthrough (all tiers)
+
+### Setup: create two accounts
 ```
 Account 1: alice@example.com / password123
-Account 2: bob@example.com / password123
+Account 2: bob@example.com   / password123
 ```
 
-### Demo flow
-
-#### Step 1: Multi-user Login (Feature 3)
-1. Signup as alice@example.com
-2. Logout (top-right button)
-3. Signup as bob@example.com
-4. Show that each user has separate data
-
-#### Step 2: Trusted Contacts (for SOS)
-1. Go to **Guardian** tab
-2. Add trusted contact:
-   - Name: Mom
-   - Phone: +1-555-0100
-   - Relation: Parent
-3. Add more contacts (simulating real scenario)
-
-#### Step 3: Predictive Risk Alert (Feature 2)
-1. Go to **Safety Map** tab
-2. Click on map to create audit
-   - Area name: "Dark Alley Park"
-   - Set all sliders to ~1 (low score)
-   - Submit audit → creates high-risk zone
-3. Go back to **Guardian** tab
-4. Click "Start Sharing" (location share)
-   - **Real-time popup notification:** "⚠️ High-risk area nearby!"
-   - Shows proactive warning before user enters danger zone
-
-#### Step 4: Voice Distress Detection (Feature 1)
-1. Go to **Home** tab
-2. Section: "Voice Distress Detection"
-3. Click "Start Listening" → Speak: "help me" or "bachao madad"
-4. Click "Analyze Transcript"
-   - Shows: "🚨 DISTRESS DETECTED"
-   - Confidence: 85% (example)
-   - Matched keywords: ["help", "madad"]
-5. If confidence > 70%, auto-triggers SOS
-
-**Production note:** Currently uses keyword fallback. Real version uses TensorFlow.js audio ML to detect screams directly.
-
-#### Step 5: Real-time SOS (Feature 4)
-1. Home tab → "Emergency SOS" section
-2. Click **SOS** button
-   - **Real-time notification pops up:** Alert shows location + timestamp
-   - Contacts get notified instantly (WebSocket push, no polling)
-   - Shows "Alert sent to 2 contact(s)" + delivery status
-
-#### Step 6: Admin Analytics Dashboard (Feature 5)
-1. Create admin account: Create user, then manually set `is_admin = 1` in DB
+### Tier 1 — Core safety features
+1. **Multi-user login** — sign up as Alice, log out, sign up as Bob, note
+   each account's data (contacts, alerts) is isolated.
+2. **Trusted contacts** — Guardian tab → add a contact (Name/Phone/Relation).
+3. **Predictive risk alert** — Safety Map tab → tap a spot → submit an
+   audit with all sliders low (~1) and an area name → go to Guardian tab →
+   "Start Sharing" near that spot → see the real-time "⚠️ high-risk area"
+   toast (now also arrives as a push notification if enabled).
+4. **Voice distress detection** — Home tab → "Start Listening" → say
+   "help me" (or type it in the transcript box) → "Analyze Transcript" →
+   see "🚨 DISTRESS DETECTED"; above the confidence threshold this
+   auto-triggers SOS.
+5. **Real audio ML monitoring** — Home tab → "Start Audio ML Monitoring" —
+   captures mic audio, computes a spectrogram in-browser, and classifies it
+   server-side via YAMNet (or the documented fallback — see
+   `utils/audio_classifier.py`).
+6. **SOS button** — Home tab → tap **SOS** → see "Alert sent to N
+   contact(s)" plus a real-time WebSocket toast and (if configured) a push
+   notification.
+7. **Admin analytics dashboard** — promote a user to admin:
    ```sql
    sqlite3 data/safeher.db
-   UPDATE users SET is_admin = 1 WHERE email = 'admin@example.com';
+   UPDATE users SET is_admin = 1 WHERE email = 'alice@example.com';
    ```
-2. Login as admin
-3. Go to **Admin** link (top-right navbar)
-4. Dashboard shows:
-   - **Stat cards:** Total audits, avg score, high-risk zones, risk alerts
-   - **Heatmap:** All audits plotted (red = unsafe, green = safe)
-   - **Top Unsafe Zones:** Lists worst-scored areas
-   - **Alerts Timeline:** 7-day SOS trends
+   Log out/in, then open the **Admin** link in the top nav.
 
----
+### Tier 2 — Security & offline
+8. **Two-Factor Authentication** — Home tab → "Account Security" card →
+   "Enable 2FA" → scan the QR code in an authenticator app → confirm with
+   the 6-digit code. Log out and back in to see the TOTP prompt.
+9. **Offline-first** — open DevTools → Network → set to "Offline" → tap
+   **SOS** → see it queue with "will retry automatically" → go back online
+   → see it auto-sync (also shows up as `offline_sync` in `/api/alerts`).
+10. **Rate limiting** — try 6 wrong-password login attempts within 15
+    minutes on the same account → see a 429 with a "please wait" message.
 
-## 🗄️ Database management
+### Tier 3 — Real-time, live tracking, Bubble, community
+11. **Bubble members** — as Alice, Guardian tab → "Bubble Members" → invite
+    `bob@example.com` → log in as Bob → accept the invite → as Alice,
+    "Start Live Tracking" → as Bob, select Alice from the dropdown →
+    "View Live Location" → watch Alice's breadcrumb trail update live.
+12. **Community feed** — Community tab → post a safety alert / safe-spot
+    tip → see it appear instantly.
+13. **Push notifications** — see [section 3](#3-push-notifications) above.
+14. **Accessibility** — unplug your mouse: Tab through the tab bar (arrow
+    keys move between tabs, Enter/Space activates), trigger the fake call
+    and confirm focus is trapped inside the overlay and returns to the
+    button that opened it on close.
+15. **Frontend error resilience** — in DevTools → Network, block requests
+    to `cdn.socket.io` (or `unpkg.com` for Leaflet) and reload. Real-time
+    alerts (or the map) should show a clear "unavailable" message instead
+    of a blank broken page, and everything else should keep working.
+    Any JS error anywhere in the app is also POSTed to
+    `/api/client-error` — check the server log (`safeher.push`/root
+    logger output) to see it land.
 
+## 5. Database management
+
+<<<<<<< HEAD
 > **Note:** the database now runs in WAL mode (see "Database robustness &
 > using PostgreSQL" above), so you'll see `safeher.db-wal` and
 > `safeher.db-shm` files alongside `safeher.db` in `data/` — that's normal
 > and they're safe to ignore (SQLite manages them automatically).
 
 ### View database
+=======
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 ```bash
 sqlite3 data/safeher.db
 ```
-
-### Useful queries
 
 **Create admin user:**
 ```sql
@@ -113,7 +162,7 @@ UPDATE users SET is_admin = 1 WHERE email = 'admin@example.com';
 
 **View all users:**
 ```sql
-SELECT id, email, is_admin FROM users;
+SELECT id, email, is_admin, totp_enabled FROM users;
 ```
 
 **View high-risk audits:**
@@ -123,17 +172,21 @@ SELECT area_name, overall_score FROM audits WHERE overall_score < 45;
 
 **View SOS alerts (last 7 days):**
 ```sql
-SELECT user_id, trigger_type, created_at FROM alerts 
+SELECT user_id, trigger_type, created_at FROM alerts
 WHERE created_at > datetime('now', '-7 days');
 ```
 
-**View risk alerts (Feature 2):**
+**View risk alerts:**
 ```sql
 SELECT * FROM risk_alerts;
 ```
 
----
+**View push subscriptions:**
+```sql
+SELECT user_id, endpoint, created_at FROM push_subscriptions;
+```
 
+<<<<<<< HEAD
 ## ⚙️ Environment-based configuration (Tier 3)
 
 The app now loads all sensitive/environment-specific values from environment
@@ -267,9 +320,14 @@ tail -f logs/app.log
 ---
 
 ## 🔐 Security notes (before production)
+=======
+## 6. Accessibility testing
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
-⚠️ **Change these before deploying:**
+An automated pass with [axe-core](https://github.com/dequelabs/axe-core)
+is the fastest way to catch regressions:
 
+<<<<<<< HEAD
 1. **Secret key** — now read from the `SECRET_KEY` environment variable
    (see `.env.example` / the "Environment-based configuration" section
    above) instead of being hardcoded in `app.py`. Generate a random one:
@@ -279,15 +337,53 @@ tail -f logs/app.log
 
 2. **Database:** Use PostgreSQL instead of SQLite for multi-region — see
    "Using PostgreSQL" above.
+=======
+```bash
+npm install --no-save jsdom axe-core
+node -e "
+const fs = require('fs');
+const { JSDOM } = require('jsdom');
+const axeSource = fs.readFileSync(require.resolve('axe-core/axe.min.js'), 'utf8');
+const html = fs.readFileSync('rendered.html', 'utf8'); // a Jinja-stripped copy of the template you're testing
+(async () => {
+  const dom = new JSDOM(html, { runScripts: 'outside-only', resources: 'usable', url: 'http://localhost/' });
+  dom.window.eval(axeSource);
+  const results = await dom.window.axe.run(dom.window.document, { runOnly: { type: 'tag', values: ['wcag2a','wcag2aa'] } });
+  console.log('violations:', results.violations.length);
+  results.violations.forEach(v => console.log(v.impact, v.id, v.help));
+})();
+"
+```
 
-3. **WebSocket:** Use production-grade eventlet/gevent worker:
+This catches missing labels, invalid ARIA structure, and contrast/name
+issues automatically, but **cannot** verify actual keyboard behavior
+(focus traps, arrow-key navigation, tab order) — test those manually, or
+with a real browser extension (axe DevTools / Lighthouse) against the
+running app for a fuller pass, since jsdom doesn't execute layout/paint.
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
+
+## 7. Security notes before deploying anywhere real
+
+⚠️ **Change these first:**
+
+1. **Secret key** — set a real `SECRET_KEY` in `.env` (see section 2).
+2. **VAPID keys** — generate your own; never reuse an example keypair.
+3. **Database** — move off SQLite for multi-worker/multi-region deployment.
+4. **Rate limit storage** — point `RATELIMIT_STORAGE_URI` at Redis.
+5. **WebSocket** — use a production-grade eventlet/gevent worker:
    ```bash
    pip install eventlet
    gunicorn --worker-class eventlet -w 1 app:app
    ```
+6. **HTTPS** — deploy with real TLS (e.g. Let's Encrypt) and
+   `FLASK_ENV=production`.
+7. **Twilio SMS** — add real credentials to `.env` / `utils/alerts.py` to
+   replace mock SMS with real delivery.
 
-4. **HTTPS:** Deploy with SSL (Let's Encrypt)
+See [README.md's Known limitations](README.md#known-limitations) for a
+fuller list of what's still mock/heuristic vs. real.
 
+<<<<<<< HEAD
 5. **Twilio SMS:** Add credentials to `utils/alerts.py` to send real SMS
 
 6. **CORS:** Set `CORS_ORIGINS` to your real frontend origin(s) instead of
@@ -356,22 +452,38 @@ safeher_enhanced/
 ---
 
 ## 🚨 Troubleshooting
+=======
+## 8. Troubleshooting
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 ### WebSocket connection fails
-- Check browser console for errors
-- Ensure `Flask-SocketIO` is installed: `pip install flask-socketio`
-- Restart server: `python app.py`
+- Check the browser console — if socket.io's CDN was blocked, the app now
+  shows a console warning and disables just the real-time-alert feature
+  instead of breaking; other features (SOS, push, offline queue) still work.
+- Ensure `Flask-SocketIO` is installed: `pip install flask-socketio`.
 
-### Admin dashboard shows 403 error
-- Make sure user has `is_admin = 1` in database
-- Logout and login again to refresh session
+### Push notifications don't arrive
+- Confirm `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are set and the server was
+  restarted after adding them.
+- Confirm the browser granted permission (`Notification.permission ===
+  "granted"`) and that a service worker is registered
+  (`navigator.serviceWorker.getRegistrations()` in DevTools console).
+- Closing the tab is expected/required to test "works when closed" — but
+  the browser process itself usually needs to keep running in the
+  background depending on OS/browser push wake-up support.
 
-### Notifications don't appear
-- Check browser DevTools Console for WebSocket errors
-- Ensure page isn't in background (browser limits notifications)
-- Test with `/api/test-notification` endpoint
+### Admin dashboard shows 403
+- Make sure the user has `is_admin = 1` in the database, then log out and
+  back in to refresh the session.
+
+### Map doesn't load
+- If Leaflet's CDN (`unpkg.com`) is blocked, the app now shows an inline
+  "map unavailable" message in the map panel instead of a blank broken
+  page — check the browser console for the CDN warning to confirm that's
+  the cause, and check your network egress rules if it's unexpected.
 
 ### Risk alert doesn't trigger
+<<<<<<< HEAD
 - Create audit with low score (< 45) first on map
 - Share location in Guardian tab
 - Geofence is 500m (0.5 km) — adjust test coordinates if needed
@@ -420,3 +532,9 @@ Fully scalable for production deployment!"
 ---
 
 Happy demoing! 🛡️ 💪
+=======
+- Create an audit with a low score (< 45) first on the Safety Map.
+- Share location in the Guardian tab near that same spot.
+- The geofence/ML feature radius is roughly 500m — adjust test coordinates
+  if needed.
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)

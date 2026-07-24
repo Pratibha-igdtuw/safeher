@@ -10,15 +10,23 @@
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+<<<<<<< HEAD
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
 <!-- FEATURE 4: WebSocket for real-time notifications -->
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+=======
+<!-- FEATURE 4: WebSocket for real-time notifications.
+     onerror flips a flag main.js checks before calling io(), so a blocked/
+     failed CDN degrades real-time alerts gracefully instead of throwing a
+     ReferenceError that would halt the rest of main.js. -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js" onerror="window.__SAFEHER_CDN_FAILED = window.__SAFEHER_CDN_FAILED || {}; window.__SAFEHER_CDN_FAILED.socketio = true;"></script>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 <!-- TIER 1 FEATURE 1: TensorFlow.js — used client-side only to capture mic
      audio and compute a log-mel spectrogram; the actual YAMNet inference
      runs server-side in /api/audio-classify (see static/js/main.js and
      utils/audio_classifier.py). Loaded lazily; main.js works fine (via the
      transcript-keyword path) even if this CDN is unreachable. -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js" onerror="window.__SAFEHER_CDN_FAILED = window.__SAFEHER_CDN_FAILED || {}; window.__SAFEHER_CDN_FAILED.tfjs = true;"></script>
 </head>
 <body>
 
@@ -32,11 +40,13 @@
   <p class="tagline">AI Guardian for Women's Safety</p>
 
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="home">Home</button>
-    <button class="tab-btn" data-tab="map">Safety Map</button>
-    <button class="tab-btn" data-tab="directory">Directory</button>
-    <button class="tab-btn" data-tab="guardian">Guardian</button>
-    <button class="tab-btn" data-tab="community">Community</button>
+    <div role="tablist" aria-label="SafeHer sections" style="display:flex; gap:6px; flex-wrap:wrap;">
+      <button class="tab-btn active" data-tab="home" role="tab" id="tabbtn-home" aria-selected="true" aria-controls="tab-home">Home</button>
+      <button class="tab-btn" data-tab="map" role="tab" id="tabbtn-map" aria-selected="false" aria-controls="tab-map" tabindex="-1">Safety Map</button>
+      <button class="tab-btn" data-tab="directory" role="tab" id="tabbtn-directory" aria-selected="false" aria-controls="tab-directory" tabindex="-1">Directory</button>
+      <button class="tab-btn" data-tab="guardian" role="tab" id="tabbtn-guardian" aria-selected="false" aria-controls="tab-guardian" tabindex="-1">Guardian</button>
+      <button class="tab-btn" data-tab="community" role="tab" id="tabbtn-community" aria-selected="false" aria-controls="tab-community" tabindex="-1">Community</button>
+    </div>
     {% if is_admin %}
     <a href="/admin" class="admin-nav-link">📊 Admin</a>
     {% endif %}
@@ -112,13 +122,13 @@
 </div>
 
 <!-- ============================= HOME TAB ============================= -->
-<main id="tab-home" class="grid tab-panel">
+<main id="tab-home" class="grid tab-panel" role="tabpanel" aria-labelledby="tabbtn-home">
 
   <section class="card sos-card reveal">
     <h2>Emergency SOS</h2>
     <p class="muted">One tap sends your live location + alert to all trusted contacts.</p>
-    <button id="sosBtn" class="sos-button">SOS</button>
-    <p id="sosStatus" class="status-line"></p>
+    <button id="sosBtn" class="sos-button" aria-label="Send emergency SOS alert to trusted contacts">SOS</button>
+    <p id="sosStatus" class="status-line" role="status" aria-live="assertive" aria-atomic="true"></p>
   </section>
 
 <section class="card reveal" id="fakeCallCard">
@@ -128,7 +138,7 @@
   </h2>
     <p class="muted">Trigger a realistic incoming call to exit an uncomfortable situation.</p>
     <div class="row">
-      <select id="fakeCallDelay">
+      <select id="fakeCallDelay" aria-label="Delay before fake call rings">
         <option value="0">Now</option>
         <option value="5">In 5 sec</option>
         <option value="15">In 15 sec</option>
@@ -174,7 +184,7 @@
   </h2>
     <p class="muted">Set a timer. If you don't check in before it ends, contacts get alerted automatically.</p>
     <div class="row">
-      <input id="checkinMinutes" type="number" min="1" value="1" />
+      <input id="checkinMinutes" type="number" min="1" value="1" aria-label="Check-in timer minutes" />
       <span class="muted">minutes</span>
       <button id="startCheckinBtn" class="btn">Start Timer</button>
     </div>
@@ -205,11 +215,24 @@
   <ul id="alertsList" class="alerts-list"></ul>
 </section>
 
+<<<<<<< HEAD
 <section class="card reveal" id="twoFaCard">
   <h2>
     <span data-lucide="shield-check" style="width:18px;height:18px;"></span>
     Account Security — 2FA
   </h2>
+=======
+  <section class="card" id="pushCard">
+    <h2>Push Notifications</h2>
+    <p class="muted">Get SOS, high-risk-area, and check-in alerts as native notifications — even when this tab is closed.</p>
+    <p id="pushStatus" class="status-line" role="status" aria-live="polite"></p>
+    <button id="enablePushBtn" class="btn safe-btn">🔔 Enable Push Notifications</button>
+    <button id="disablePushBtn" class="btn secondary hidden">Disable Push Notifications</button>
+  </section>
+
+  <section class="card" id="twoFaCard">
+    <h2>Account Security — 2FA</h2>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Add an authenticator app (Google/Microsoft Authenticator) as a second login step.</p>
     <p id="twoFaStatus" class="status-line"></p>
 
@@ -238,7 +261,7 @@
 </main>
 
 <!-- ============================= MAP TAB ============================= -->
-<main id="tab-map" class="tab-panel hidden">
+<main id="tab-map" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-map">
   <div class="map-layout">
 
     <div class="map-side card">
@@ -266,9 +289,13 @@
 </main>
 
 <!-- AUDIT MODAL -->
-<div id="auditModal" class="modal-overlay hidden">
+<div id="auditModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auditModalTitle">
   <div class="modal-box">
+<<<<<<< HEAD
     <h2><span data-lucide="clipboard-check" style="width:19px;height:19px;"></span> Safety Audit</h2>
+=======
+    <h2 id="auditModalTitle">Safety Audit</h2>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Rate this spot on 6 quick parameters (0 = poor, 4 = excellent) — SafetiPin's audit model.</p>
     <input id="auditAreaName" type="text" placeholder="Area name (optional)" />
 
@@ -291,12 +318,18 @@
 </div>
 
 <!-- ============================= DIRECTORY TAB ============================= -->
+<<<<<<< HEAD
 <main id="tab-directory" class="tab-panel hidden">
 <section class="card reveal">
   <h2>
     <span data-lucide="building-2" style="width:19px;height:19px;"></span>
     Nearby Safety Services
   </h2>
+=======
+<main id="tab-directory" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-directory">
+  <section class="card">
+    <h2>Nearby Safety Services</h2>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Police stations, hospitals, pharmacies, and helplines closest to you.</p>
     <div class="row">
       <button class="btn filter-btn active" data-type="">All</button>
@@ -310,7 +343,7 @@
 </main>
 
 <!-- ============================= GUARDIAN TAB ============================= -->
-<main id="tab-guardian" class="tab-panel hidden">
+<main id="tab-guardian" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-guardian">
   <div class="map-layout">
     <div class="map-side card">
       <h2><span data-lucide="users" style="width:19px;height:19px;"></span> Bubble</h2>
@@ -361,9 +394,15 @@
 
       <h3 style="margin-top:14px; font-size:14px;">Track a Bubble member</h3>
       <div class="row">
+<<<<<<< HEAD
         <select id="trackableSelect"></select>
         <button id="startTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
         <button id="stopTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+=======
+        <select id="trackableSelect" aria-label="Bubble member to view live location for"></select>
+        <button id="viewTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
+        <button id="stopViewTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
       </div>
     </div>
 
@@ -374,16 +413,22 @@
 </main>
 
 <!-- ============================= COMMUNITY TAB ============================= -->
+<<<<<<< HEAD
 <main id="tab-community" class="tab-panel hidden">
 <section class="card reveal">
   <h2>
     <span data-lucide="megaphone" style="width:19px;height:19px;"></span>
     Community Safety Feed
   </h2>
+=======
+<main id="tab-community" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-community">
+  <section class="card">
+    <h2>Community Safety Feed</h2>
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Share and see real-time safety alerts and safe-spot tips from people nearby — like I'M SAFE's Community Feed.</p>
 
     <div class="row">
-      <select id="feedPostType">
+      <select id="feedPostType" aria-label="Community feed post type">
         <option value="alert">⚠️ Alert</option>
         <option value="safe_spot">✅ Safe Spot</option>
         <option value="incident">🚨 Incident Report</option>
@@ -427,19 +472,66 @@
 </script>
 
 <!-- FAKE CALL OVERLAY -->
-<div id="fakeCallOverlay" class="fake-call-overlay hidden">
+<div id="fakeCallOverlay" class="fake-call-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="callerName" aria-describedby="fakeCallRinging">
   <div class="fake-call-screen">
     <p class="caller-label">Incoming call</p>
     <h1 id="callerName">Mom</h1>
-    <p class="ringing">ringing...</p>
+    <p class="ringing" id="fakeCallRinging">ringing...</p>
     <div class="call-actions">
-      <button id="declineCallBtn" class="call-btn decline">✕</button>
-      <button id="acceptCallBtn" class="call-btn accept">✓</button>
+      <button id="declineCallBtn" class="call-btn decline" aria-label="Decline call">✕</button>
+      <button id="acceptCallBtn" class="call-btn accept" aria-label="Accept call">✓</button>
     </div>
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" onerror="window.__SAFEHER_CDN_FAILED = window.__SAFEHER_CDN_FAILED || {}; window.__SAFEHER_CDN_FAILED.leaflet = true;"></script>
+<script>
+  // ---------------------------------------------------------------------
+  // FRONTEND ERROR RESILIENCE: report client-side errors so failures on
+  // real users' devices are visible to us instead of invisible. Fire-and-
+  // forget — never blocks or throws back into the page.
+  // ---------------------------------------------------------------------
+  (function () {
+    function reportClientError(payload) {
+      try {
+        navigator.sendBeacon
+          ? navigator.sendBeacon("/api/client-error", new Blob([JSON.stringify(payload)], { type: "application/json" }))
+          : fetch("/api/client-error", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              keepalive: true,
+            }).catch(() => {});
+      } catch (e) {
+        // Never let error reporting itself throw.
+      }
+    }
+
+    window.addEventListener("error", (event) => {
+      reportClientError({
+        kind: "error",
+        message: event.message,
+        source: event.filename,
+        line: event.lineno,
+        col: event.colno,
+        stack: event.error && event.error.stack,
+        url: window.location.href,
+        ua: navigator.userAgent,
+      });
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      reportClientError({
+        kind: "unhandledrejection",
+        message: reason && reason.message ? reason.message : String(reason),
+        stack: reason && reason.stack,
+        url: window.location.href,
+        ua: navigator.userAgent,
+      });
+    });
+  })();
+</script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
 <script>

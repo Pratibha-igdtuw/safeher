@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Virtual Environment
 venv/
 
@@ -28,3 +29,8 @@ Thumbs.db
 # Database
 data/*.db
 *.db
+=======
+.venv/
+__pycache__/
+*.pyc
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)

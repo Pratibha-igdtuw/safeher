@@ -67,12 +67,31 @@ function scoreColor(score) {
 // ---------------------------------------------------------------------------
 // FEATURE 4: WebSocket Real-Time Notifications
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// FRONTEND ERROR RESILIENCE: every CDN <script> tag in index.html sets a flag
+// on window.__SAFEHER_CDN_FAILED via onerror if it fails/is blocked. We check
+// those flags before touching the corresponding global, and always fall back
+// to a no-op/degraded stand-in so one blocked CDN can't halt the rest of
+// main.js (a single uncaught ReferenceError at module scope would otherwise
+// stop every listener below it from ever being registered).
+// ---------------------------------------------------------------------------
+const CDN_FAILED = window.__SAFEHER_CDN_FAILED || {};
+
+function noopSocket() {
+  return { on: () => {}, emit: () => {}, connected: false };
+}
+
 let socket;
-try {
-  socket = io();
-} catch (e) {
-  console.warn("Socket.io unavailable — real-time alerts disabled", e);
-  socket = { on: () => {}, emit: () => {}, connected: false }; // no-op fallback so rest of main.js still runs
+if (CDN_FAILED.socketio || typeof io === "undefined") {
+  console.warn("Socket.io CDN unavailable — real-time alerts disabled for this session");
+  socket = noopSocket();
+} else {
+  try {
+    socket = io();
+  } catch (e) {
+    console.warn("Socket.io failed to initialize — real-time alerts disabled", e);
+    socket = noopSocket();
+  }
 }
 
 socket.on("connect", () => {
@@ -125,6 +144,8 @@ function showNotification(title, message, type) {
   // Create notification element
   const notif = document.createElement("div");
   notif.className = `notification notification-${type}`;
+  notif.setAttribute("role", "alert");
+  notif.setAttribute("aria-live", type === "critical" ? "assertive" : "polite");
   notif.innerHTML = `<strong>${title}</strong><br/>${message}`;
   document.body.appendChild(notif);
   
@@ -191,13 +212,19 @@ const tabPanels = {
   community: document.getElementById("tab-community"),
 };
 
-tabButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    tabButtons.forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    Object.values(tabPanels).forEach((p) => p.classList.add("hidden"));
-    tabPanels[btn.dataset.tab].classList.remove("hidden");
+function activateTab(btn) {
+  tabButtons.forEach((b) => {
+    const isActive = b === btn;
+    b.classList.toggle("active", isActive);
+    b.setAttribute("aria-selected", isActive ? "true" : "false");
+    // Roving tabindex: only the active tab is in the normal Tab order;
+    // arrow keys move focus between the rest (standard tablist pattern).
+    b.tabIndex = isActive ? 0 : -1;
+  });
+  Object.values(tabPanels).forEach((p) => p.classList.add("hidden"));
+  tabPanels[btn.dataset.tab].classList.remove("hidden");
 
+<<<<<<< HEAD
     const heroEl = document.getElementById("tab-home-hero");
     if (heroEl) heroEl.classList.toggle("hidden", btn.dataset.tab !== "home");
 
@@ -213,6 +240,39 @@ tabButtons.forEach((btn) => {
     if (btn.dataset.tab === "community") {
       loadFeed();
     }
+=======
+  if (btn.dataset.tab === "map") {
+    setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
+  }
+  if (btn.dataset.tab === "directory") {
+    loadServices(currentServiceFilter);
+  }
+  if (btn.dataset.tab === "guardian") {
+    setTimeout(() => bubbleMap && bubbleMap.invalidateSize(), 50);
+  }
+  if (btn.dataset.tab === "community") {
+    loadFeed();
+  }
+}
+
+tabButtons.forEach((btn, i) => {
+  btn.addEventListener("click", () => activateTab(btn));
+
+  // Arrow-key navigation between tabs, per the standard ARIA tablist
+  // keyboard pattern (Tab/Enter/Space already work for free on <button>).
+  btn.addEventListener("keydown", (e) => {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    let nextIndex = i;
+    if (e.key === "ArrowRight") nextIndex = (i + 1) % tabButtons.length;
+    else if (e.key === "ArrowLeft") nextIndex = (i - 1 + tabButtons.length) % tabButtons.length;
+    else if (e.key === "Home") nextIndex = 0;
+    else if (e.key === "End") nextIndex = tabButtons.length - 1;
+
+    const nextBtn = tabButtons[nextIndex];
+    nextBtn.focus();
+    activateTab(nextBtn);
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
   });
 });
 
@@ -270,12 +330,46 @@ fakeCallBtn.addEventListener("click", () => {
   setTimeout(showFakeCall, delay);
 });
 
-function showFakeCall() {
-  overlay.classList.remove("hidden");
-  fakeCallStatus.textContent = "";
+// ---------------------------------------------------------------------
+// Accessibility: focus trap for the fake-call modal overlay. While it's
+// open, Tab/Shift+Tab cycle only between the overlay's own controls, and
+// closing it returns focus to whatever triggered the call.
+// ---------------------------------------------------------------------
+let fakeCallPreviouslyFocused = null;
+
+function trapFocus(e) {
+  if (e.key !== "Tab") return;
+  const focusable = overlay.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }
 
-declineCallBtn.addEventListener("click", () => overlay.classList.add("hidden"));
+function closeFakeCall() {
+  overlay.classList.add("hidden");
+  overlay.removeEventListener("keydown", trapFocus);
+  if (fakeCallPreviouslyFocused && typeof fakeCallPreviouslyFocused.focus === "function") {
+    fakeCallPreviouslyFocused.focus();
+  }
+}
+
+function showFakeCall() {
+  fakeCallPreviouslyFocused = document.activeElement;
+  overlay.classList.remove("hidden");
+  fakeCallStatus.textContent = "";
+  overlay.addEventListener("keydown", trapFocus);
+  declineCallBtn.focus();
+}
+
+declineCallBtn.addEventListener("click", closeFakeCall);
 
 acceptCallBtn.addEventListener("click", () => {
   overlay.querySelector(".ringing").textContent = "00:01";
@@ -284,7 +378,7 @@ acceptCallBtn.addEventListener("click", () => {
 
 function speakScript(i) {
   if (i >= FAKE_SCRIPT.length) {
-    setTimeout(() => overlay.classList.add("hidden"), 1500);
+    setTimeout(closeFakeCall, 1500);
     return;
   }
   if (window.speechSynthesis) {
@@ -766,6 +860,16 @@ let markers = [];
 let selectedLocation = null;
 
 function initMap() {
+  if (CDN_FAILED.leaflet || typeof L === "undefined") {
+    const mapEl = document.getElementById("leafletMap");
+    if (mapEl) {
+      mapEl.innerHTML =
+        '<p class="muted" style="padding:16px;">🗺️ Map unavailable — the map library could not load. Everything else in the app still works.</p>';
+    }
+    console.warn("Leaflet CDN unavailable — Safety Score Map disabled for this session");
+    return;
+  }
+
   leafletMap = L.map("leafletMap").setView([28.7041, 77.1025], 12); // Default: Delhi
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap contributors",
@@ -944,6 +1048,16 @@ const addContactBtn = document.getElementById("addContactBtn");
 const contactsList = document.getElementById("contactsList");
 
 function initBubbleMap() {
+  if (CDN_FAILED.leaflet || typeof L === "undefined") {
+    const mapEl = document.getElementById("bubbleMap");
+    if (mapEl) {
+      mapEl.innerHTML =
+        '<p class="muted" style="padding:16px;">🗺️ Map unavailable — the map library could not load. Location sharing and tracking still work; you just won\'t see the live map here.</p>';
+    }
+    console.warn("Leaflet CDN unavailable — Guardian map disabled for this session");
+    return;
+  }
+
   bubbleMap = L.map("bubbleMap").setView([28.7041, 77.1025], 12);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap contributors",
@@ -1117,8 +1231,13 @@ const sendInviteBtn = document.getElementById("sendInviteBtn");
 const incomingInvitesList = document.getElementById("incomingInvitesList");
 const canTrackMeList = document.getElementById("canTrackMeList");
 const trackableSelect = document.getElementById("trackableSelect");
+<<<<<<< HEAD
 const bubbleViewBtn = document.getElementById("bubbleViewBtn");
 const bubbleStopViewBtn = document.getElementById("bubbleStopViewBtn");
+=======
+const viewTrackingBtn = document.getElementById("viewTrackingBtn");
+const stopViewTrackingBtn = document.getElementById("stopViewTrackingBtn");
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 let currentlyTrackingUserId = null;
 let trackedMarker = null;
@@ -1152,7 +1271,11 @@ async function loadLinkedContacts() {
   trackableSelect.innerHTML = accepted.length
     ? accepted.map((r) => `<option value="${r.owner_user_id}">${r.owner_email}</option>`).join("")
     : `<option value="">No accepted Bubble members yet</option>`;
+<<<<<<< HEAD
   bubbleViewBtn.disabled = accepted.length === 0;
+=======
+  viewTrackingBtn.disabled = accepted.length === 0;
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 }
 
 window.respondToInvite = async (inviteId, accept) => {
@@ -1177,16 +1300,28 @@ sendInviteBtn?.addEventListener("click", async () => {
   }
 });
 
+<<<<<<< HEAD
 bubbleViewBtn?.addEventListener("click", () => {
+=======
+viewTrackingBtn?.addEventListener("click", () => {
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
   const targetUserId = parseInt(trackableSelect.value, 10);
   if (!targetUserId) return;
   currentlyTrackingUserId = targetUserId;
   socket.emit("join_tracking", { user_id: targetUserId });
+<<<<<<< HEAD
   bubbleViewBtn.classList.add("hidden");
   bubbleStopViewBtn.classList.remove("hidden");
 });
 
 bubbleStopViewBtn?.addEventListener("click", () => {
+=======
+  viewTrackingBtn.classList.add("hidden");
+  stopViewTrackingBtn.classList.remove("hidden");
+});
+
+stopViewTrackingBtn?.addEventListener("click", () => {
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
   stopTrackingUI();
 });
 
@@ -1199,8 +1334,13 @@ function stopTrackingUI() {
     bubbleMap.removeLayer(trackedMarker);
     trackedMarker = null;
   }
+<<<<<<< HEAD
   bubbleViewBtn?.classList.remove("hidden");
   bubbleStopViewBtn?.classList.add("hidden");
+=======
+  viewTrackingBtn?.classList.remove("hidden");
+  stopViewTrackingBtn?.classList.add("hidden");
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
 }
 
 function updateTrackedLocationOnMap(data) {
@@ -1212,7 +1352,11 @@ function updateTrackedLocationOnMap(data) {
   } else {
     trackedMarker = L.circleMarker([data.latitude, data.longitude], {
       radius: 10,
+<<<<<<< HEAD
       fillColor: "#EF4444",
+=======
+      fillColor: "#ff4757",
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -1390,6 +1534,7 @@ window.addEventListener("online", () => {
 updateOfflineBanner();
 syncOfflineQueue(); // in case there were queued actions from a previous offline session
 // ---------------------------------------------------------------------------
+<<<<<<< HEAD
 // PREMIUM UI LAYER — purely visual. Adds no new routes, changes no existing
 // behaviour, and never blocks if an element is missing (e.g. other tabs).
 // ---------------------------------------------------------------------------
@@ -1497,3 +1642,119 @@ syncOfflineQueue(); // in case there were queued actions from a previous offline
     tick();
   }
 })();
+=======
+// TIER 3 PART 3: Real Web Push (works even when the tab is closed)
+// ---------------------------------------------------------------------------
+const enablePushBtn = document.getElementById("enablePushBtn");
+const disablePushBtn = document.getElementById("disablePushBtn");
+const pushStatus = document.getElementById("pushStatus");
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function pushSupported() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+async function refreshPushUI() {
+  if (!enablePushBtn) return; // markup not present on this page
+
+  if (!pushSupported()) {
+    pushStatus.textContent = "Push notifications aren't supported in this browser.";
+    enablePushBtn.disabled = true;
+    return;
+  }
+
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const existing = await registration.pushManager.getSubscription();
+    if (existing) {
+      pushStatus.textContent = "✓ Push notifications are on for this device.";
+      enablePushBtn.classList.add("hidden");
+      disablePushBtn.classList.remove("hidden");
+    } else {
+      pushStatus.textContent = "Push notifications are off.";
+      enablePushBtn.classList.remove("hidden");
+      disablePushBtn.classList.add("hidden");
+    }
+  } catch (err) {
+    console.warn("Couldn't read push subscription state", err);
+  }
+}
+
+async function enablePush() {
+  if (!pushSupported()) return;
+
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      pushStatus.textContent = "Permission denied — enable notifications for this site in your browser settings to turn this on.";
+      return;
+    }
+
+    const keyRes = await api("/api/push/vapid-public-key");
+    if (!keyRes._ok || !keyRes.public_key) {
+      pushStatus.textContent = "Push isn't configured on the server yet.";
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(keyRes.public_key),
+    });
+
+    const subJson = subscription.toJSON();
+    const result = await api("/api/push/subscribe", {
+      method: "POST",
+      body: JSON.stringify({
+        endpoint: subJson.endpoint,
+        keys: subJson.keys,
+      }),
+    });
+
+    if (result._ok) {
+      showNotification("🔔 Push enabled", "You'll now get alerts even when this tab is closed.", "info");
+    }
+    await refreshPushUI();
+  } catch (err) {
+    console.error("Push subscription failed", err);
+    pushStatus.textContent = "Couldn't enable push notifications: " + err.message;
+  }
+}
+
+async function disablePush() {
+  if (!pushSupported()) return;
+
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      await api("/api/push/unsubscribe", {
+        method: "POST",
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+      });
+      await subscription.unsubscribe();
+    }
+    pushStatus.textContent = "Push notifications turned off.";
+    await refreshPushUI();
+  } catch (err) {
+    console.error("Push unsubscribe failed", err);
+  }
+}
+
+enablePushBtn?.addEventListener("click", enablePush);
+disablePushBtn?.addEventListener("click", disablePush);
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.ready.then(refreshPushUI).catch(() => {});
+}
+>>>>>>> 12f0b65 (Updated SafeHer features and UI)
