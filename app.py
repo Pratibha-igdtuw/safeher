@@ -57,15 +57,12 @@ from utils.distress_detector import check_distress
 from utils.safety_services import get_nearby_services
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
-<<<<<<< HEAD
-=======
 from utils.push import (
     send_push_to_user,
     send_push_to_users,
     get_vapid_public_key,
     push_configured,
 )
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 from validators import (
     validate_json,
     LoginSchema,
@@ -80,12 +77,9 @@ from validators import (
     CheckLocationRiskSchema,
     GuardianShareSchema,
     FeedPostSchema,
-<<<<<<< HEAD
-=======
     PushSubscribeSchema,
     PushUnsubscribeSchema,
     ClientErrorSchema,
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 )
 
 from config import get_config
@@ -121,15 +115,9 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 app = Flask(__name__)
-<<<<<<< HEAD
 app.config.from_object(get_config())
-
-DB_PATH = app.config["DATABASE_PATH"]  # kept for any code/tests referencing DB_PATH directly
-
-socketio = SocketIO(app, cors_allowed_origins=app.config["CORS_ORIGINS"])
-=======
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 app.secret_key = os.environ.get("SECRET_KEY", "safeher-secret-key-change-in-production")
+DB_PATH = app.config["DATABASE_PATH"]
 
 # --- Secure session / cookie config ---
 app.config.update(
@@ -193,6 +181,56 @@ except ImportError:  # pragma: no cover - only hit if flask-talisman isn't insta
 logging.basicConfig(level=logging.INFO)
 security_logger = logging.getLogger("safeher.security")
 
+
+def configure_logging(flask_app):
+    """Configure console + rotating file logging for SafeHer."""
+    log_dir = flask_app.config["LOG_DIR"]
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_level = getattr(
+        logging,
+        str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(),
+        logging.INFO,
+    )
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "app.log"),
+        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
+        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.handlers = [file_handler, console_handler]
+
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.handlers = [file_handler, console_handler]
+    werkzeug_logger.setLevel(log_level)
+
+    return logging.getLogger("safeher")
+
+
+logger = configure_logging(app)
+
+
+def hash_identifier(value):
+    """One-way hash of identifying values for audit-friendly logs."""
+    if value is None:
+        return "unknown"
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
 _failed_login_counts = defaultdict(int)
 
 
@@ -221,77 +259,6 @@ def handle_rate_limit(e):
     resp.status_code = 429
     return resp
 
-<<<<<<< HEAD
-
-# ---------------------------------------------------------------------------
-# Structured logging (console + rotating file handler)
-# ---------------------------------------------------------------------------
-def configure_logging(flask_app):
-    """INFO for normal request/connect events, WARNING for failed logins
-    and invalid 2FA codes, ERROR for unhandled exceptions. Every SOS
-    trigger, failed login attempt, and 2FA failure is logged with a
-    timestamp + hashed user identifier — the audit trail a real safety
-    app needs."""
-    log_dir = flask_app.config["LOG_DIR"]
-    os.makedirs(log_dir, exist_ok=True)
-
-    log_level = getattr(logging, str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(), logging.INFO)
-
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
-    )
-
-    file_handler = RotatingFileHandler(
-        os.path.join(log_dir, "app.log"),
-        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
-        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(log_level)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(log_level)
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    # Avoid duplicate handlers if configure_logging() runs more than once
-    # (e.g. re-imported by tests).
-    root_logger.handlers = [file_handler, console_handler]
-
-    werkzeug_logger = logging.getLogger("werkzeug")
-    werkzeug_logger.handlers = [file_handler, console_handler]
-    werkzeug_logger.setLevel(log_level)
-
-    return logging.getLogger("safeher")
-
-
-logger = configure_logging(app)
-
-
-def hash_identifier(value):
-    """One-way hash of an identifying value (email, user id) for audit
-    logs, so log files don't contain raw PII while still letting the same
-    user's events be correlated across log lines."""
-    if value is None:
-        return "unknown"
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
-
-
-@app.errorhandler(Exception)
-def handle_unhandled_exception(exc):
-    from werkzeug.exceptions import HTTPException
-
-    if isinstance(exc, HTTPException):
-        # Let Flask's normal handling deal with expected HTTP errors
-        # (404s, etc.) instead of logging them as unhandled crashes.
-        return exc
-
-    logger.error("Unhandled exception on %s %s: %s", request.method, request.path, exc, exc_info=True)
-    return jsonify({"error": "internal server error"}), 500
-
-=======
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 # ---------------------------------------------------------------------------
 # User model for Flask-Login
@@ -574,10 +541,6 @@ def login():
             logger.info("Successful login: user=%s", hash_identifier(email))
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
         else:
-<<<<<<< HEAD
-            logger.warning("Failed login attempt: user=%s", hash_identifier(email))
-=======
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
             log_failed_login(email, ip)
             return jsonify({"error": "invalid email or password"}), 401
 
@@ -909,8 +872,6 @@ def is_accepted_linked_contact(conn, owner_user_id, viewer_user_id):
     return row is not None
 
 
-<<<<<<< HEAD
-=======
 def get_push_recipients(conn, owner_user_id):
     """TIER 3 PART 3: who should get a native push for owner_user_id's SOS /
     risk / check-in events. That's the account holder themselves (so they
@@ -925,7 +886,6 @@ def get_push_recipients(conn, owner_user_id):
     return [owner_user_id] + [row["contact_user_id"] for row in viewers]
 
 
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 @app.route("/api/contacts/invite", methods=["POST"])
 @login_required
 @validate_json(ContactInviteSchema)
@@ -1697,9 +1657,6 @@ def tracking_stop():
     return jsonify({"status": "tracking_stopped"})
 
 
-<<<<<<< HEAD
-
-=======
 @app.route("/api/tracking/my-history", methods=["GET"])
 @login_required
 def tracking_my_history():
@@ -1707,7 +1664,6 @@ def tracking_my_history():
     trail on page reload). Distinct from GET /api/tracking/history, which
     is the authorization-checked endpoint for viewing a Bubble member's
     guardian-share history."""
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
     conn = get_db()
     rows = conn.execute(
         "SELECT latitude, longitude, timestamp FROM location_history "

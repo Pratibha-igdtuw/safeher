@@ -46,9 +46,6 @@
 
 * { box-sizing: border-box; }
 
-<<<<<<< HEAD
-html { scroll-behavior: smooth; }
-=======
 /* ---------------------------------------------------------------------
    Accessibility: visible keyboard focus outline.
    A CSS reset elsewhere in this file removes default browser outlines
@@ -75,7 +72,6 @@ textarea:focus {
   outline: 3px solid var(--safe);
   outline-offset: 2px;
 }
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 body {
   margin: 0;
@@ -711,8 +707,6 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
 
 .hidden { display: none !important; }
 
-<<<<<<< HEAD
-=======
 /* Visually hidden but still announced by screen readers */
 .sr-only {
   position: absolute;
@@ -727,7 +721,6 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
 }
 
 /* Offline banner (Tier 2: offline-first PWA) */
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 .offline-banner {
   position: fixed; top: 0; left: 0; right: 0;
   background: var(--danger); color: white;
@@ -735,32 +728,6 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
   padding: 8px; z-index: 9999;
 }
 
-<<<<<<< HEAD
-.admin-nav-link {
-  color: var(--text);
-  text-decoration: none;
-  padding: 8px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  font-size: 13px;
-  font-weight: 600;
-  background: var(--card);
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-
-.admin-nav-link:hover { background: var(--primary-light); border-color: #dde1ff; color: var(--primary); }
-
-/* Toast notifications injected by main.js — override with the calm palette */
-.notification {
-  border-radius: var(--r-md) !important;
-  box-shadow: var(--shadow-lg) !important;
-  font-family: 'Inter', sans-serif !important;
-  border: 1px solid rgba(255,255,255,0.18) !important;
-}
-.notification.notification-critical { background: var(--danger) !important; }
-.notification.notification-warning { background: var(--warning) !important; }
-.notification.notification-info { background: var(--primary) !important; }
-=======
 /* Admin navigation link */
 .admin-nav-link {
   color: white;
@@ -776,4 +743,3 @@ svg[data-lucide], .card h2 svg, .map-side h2 svg { stroke-width: 2.2; }
 .admin-nav-link:hover {
   background: rgba(255,255,255,0.1);
 }
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
