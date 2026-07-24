@@ -1,7 +1,7 @@
 /* =========================================================================
    SafeHer — "Guardian Aura" premium 3D design system (Light / Lavender)
    ========================================================================= */
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+/* Fonts load via <link> in the page <head> so the stylesheet stays parser-safe. */
 
 :root {
   --bg: #f6f2fd;
