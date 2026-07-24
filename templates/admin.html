@@ -7,54 +7,45 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.css" />
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600&display=swap');
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root {
-      --bg: #0a0716;
-      --surface: rgba(255,255,255,0.045);
-      --surface-2: rgba(255,255,255,0.07);
-      --border: rgba(255,255,255,0.09);
-      --border-strong: rgba(255,255,255,0.16);
-      --text: #f4f1ff;
-      --muted: #a79fc4;
-      --violet: #8b5cf6;
-      --violet-2: #6d28d9;
-      --cyan: #22d3ee;
-      --coral: #ff4d6d;
-      --warn: #fbbf24;
-      --safe: #34d399;
+      --bg: #F6F8FC;
+      --card: #FFFFFF;
+      --border: #E2E8F0;
+      --text: #1E293B;
+      --muted: #64748B;
+      --primary: #5B6CFF;
+      --primary-2: #7C3AED;
+      --danger: #EF4444;
+      --warn: #F59E0B;
+      --safe: #22C55E;
     }
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       color: var(--text);
       min-height: 100vh;
-      background:
-        radial-gradient(700px 500px at 12% -8%, rgba(139,92,246,0.28), transparent 60%),
-        radial-gradient(600px 480px at 105% 8%, rgba(34,211,238,0.14), transparent 55%),
-        var(--bg);
+      background: var(--bg);
     }
 
     header {
       position: relative;
-      background: rgba(10,7,22,0.75);
-      backdrop-filter: blur(18px) saturate(140%);
-      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      background: rgba(246,248,252,0.85);
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
       border-bottom: 1px solid var(--border);
       padding: 28px 24px;
     }
 
     header h1 {
-      font-family: 'Space Grotesk', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 26px;
-      font-weight: 700;
+      font-weight: 800;
       margin-bottom: 4px;
-      background: linear-gradient(120deg, #fff 20%, #cbb8ff 60%, var(--cyan) 100%);
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
+      color: var(--text);
       display: inline-block;
     }
 
@@ -67,17 +58,18 @@
       top: 26px;
       right: 24px;
       padding: 9px 18px;
-      background: rgba(255,255,255,0.06);
+      background: var(--card);
       color: var(--text);
-      border: 1px solid var(--border-strong);
+      border: 1px solid var(--border);
       border-radius: 999px;
       cursor: pointer;
       font-size: 13px;
+      font-weight: 600;
       text-decoration: none;
       transition: all 0.2s;
     }
 
-    .logout-btn:hover { background: rgba(139,92,246,0.18); border-color: var(--violet); }
+    .logout-btn:hover { background: #eef0ff; border-color: #dde1ff; color: var(--primary); }
 
     .grid {
       display: grid;
@@ -88,20 +80,18 @@
 
     .stat-card {
       position: relative;
-      background: linear-gradient(160deg, var(--surface-2), var(--surface));
+      background: var(--card);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 22px;
-      box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 16px 34px -16px rgba(0,0,0,0.6);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-      border-top: 2px solid var(--violet);
+      box-shadow: 0 1px 2px rgba(30,41,59,0.04), 0 1px 3px rgba(30,41,59,0.04);
+      border-top: 3px solid var(--primary);
       transition: transform 0.25s ease, box-shadow 0.25s ease;
     }
 
-    .stat-card:hover { transform: translateY(-3px); box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset, 0 22px 44px -16px rgba(139,92,246,0.35); }
+    .stat-card:hover { transform: translateY(-3px); box-shadow: 0 12px 28px -14px rgba(30,41,59,0.18); }
 
-    .stat-card.risk { border-top-color: var(--coral); }
+    .stat-card.risk { border-top-color: var(--danger); }
     .stat-card.warning { border-top-color: var(--warn); }
 
     .stat-label {
@@ -110,34 +100,33 @@
       text-transform: uppercase;
       letter-spacing: 0.08em;
       margin-bottom: 10px;
-      font-weight: 600;
+      font-weight: 700;
     }
 
     .stat-value {
-      font-family: 'Space Grotesk', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 34px;
-      font-weight: 700;
+      font-weight: 800;
       color: var(--text);
     }
 
     .stat-subtext { font-size: 12px; color: var(--muted); margin-top: 8px; }
 
     .section {
-      background: linear-gradient(160deg, var(--surface-2), var(--surface));
+      background: var(--card);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 26px;
       margin-bottom: 24px;
-      box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 16px 34px -16px rgba(0,0,0,0.6);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 1px 2px rgba(30,41,59,0.04), 0 1px 3px rgba(30,41,59,0.04);
     }
 
     .section h2 {
-      font-family: 'Space Grotesk', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 17px;
-      font-weight: 600;
+      font-weight: 700;
       margin-bottom: 16px;
+      color: var(--text);
     }
 
     .map-wrap {
@@ -146,7 +135,6 @@
       overflow: hidden;
       margin-bottom: 16px;
       border: 1px solid var(--border);
-      filter: saturate(1.15) contrast(1.03);
     }
 
     #analyticsMap { width: 100%; height: 100%; }
@@ -165,7 +153,7 @@
     .zone-item:last-child { border-bottom: none; }
 
     .zone-score {
-      background: linear-gradient(150deg, #ff8fa3, var(--coral));
+      background: linear-gradient(150deg, #ff8a8a, var(--danger));
       color: white;
       padding: 4px 10px;
       border-radius: 999px;
@@ -183,7 +171,7 @@
 
     .timeline-bar {
       flex: 1;
-      background: linear-gradient(to top, var(--violet-2), var(--violet));
+      background: linear-gradient(to top, var(--primary-2), var(--primary));
       border-radius: 8px 8px 0 0;
       min-height: 20px;
       display: flex;
@@ -193,7 +181,6 @@
       font-size: 12px;
       font-weight: 600;
       position: relative;
-      box-shadow: 0 0 24px -6px rgba(139,92,246,0.6);
     }
 
     .timeline-bar-label {
@@ -207,8 +194,8 @@
     .loading { text-align: center; padding: 40px; color: var(--muted); }
 
     .spinner {
-      border: 2px solid rgba(255,255,255,0.1);
-      border-top: 2px solid var(--cyan);
+      border: 2px solid var(--border);
+      border-top: 2px solid var(--primary);
       border-radius: 50%;
       width: 32px;
       height: 32px;
@@ -220,20 +207,20 @@
 
     .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 8px; color: var(--muted); }
 
-    .legend-color { width: 14px; height: 14px; border-radius: 4px; box-shadow: 0 0 8px currentColor; }
+    .legend-color { width: 14px; height: 14px; border-radius: 4px; }
 
-    .legend-green { background: var(--safe); color: var(--safe); }
-    .legend-orange { background: var(--warn); color: var(--warn); }
-    .legend-red { background: var(--coral); color: var(--coral); }
+    .legend-green { background: var(--safe); }
+    .legend-orange { background: var(--warn); }
+    .legend-red { background: var(--danger); }
 
     .alert-note {
-      background: rgba(251,191,36,0.1);
+      background: #fff7e8;
       border-left: 3px solid var(--warn);
       padding: 12px 14px;
       border-radius: 8px;
       margin-bottom: 16px;
       font-size: 13px;
-      color: #ffe4a3;
+      color: #92660a;
     }
   </style>
 </head>

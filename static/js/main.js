@@ -59,9 +59,9 @@ function getLocation() {
 }
 
 function scoreColor(score) {
-  if (score >= 75) return "#2dd4bf";
-  if (score >= 45) return "#ffb020";
-  return "#ff4757";
+  if (score >= 75) return "#22C55E";
+  if (score >= 45) return "#F59E0B";
+  return "#EF4444";
 }
 
 // ---------------------------------------------------------------------------
@@ -163,17 +163,17 @@ style.textContent = `
   }
   
   .notification-critical {
-    background: #ff4757;
+    background: #EF4444;
     color: white;
   }
   
   .notification-warning {
-    background: #ffb020;
+    background: #F59E0B;
     color: white;
   }
   
   .notification-info {
-    background: #667eea;
+    background: #5B6CFF;
     color: white;
   }
 `;
@@ -374,7 +374,7 @@ analyzeBtn.addEventListener("click", async () => {
 
     if (result.distress_detected) {
       distressResult.innerHTML = `
-        <span style="color:#ff4757">🚨 DISTRESS DETECTED</span><br/>
+        <span style="color:#EF4444">🚨 DISTRESS DETECTED</span><br/>
         Confidence: ${(result.confidence * 100).toFixed(0)}%<br/>
         Matched keywords: ${result.matched.join(", ")}
         ${result.auto_trigger_sos ? "<br/>⚠️ Auto-triggering SOS..." : ""}
@@ -573,7 +573,7 @@ async function classifyAudioWindow(windowSamples) {
 
     if (result.distress_detected) {
       audioMlResult.innerHTML = `
-        <span style="color:#ff4757">🚨 DISTRESS AUDIO DETECTED (${result.distress_type})</span><br/>
+        <span style="color:#EF4444">🚨 DISTRESS AUDIO DETECTED (${result.distress_type})</span><br/>
         Confidence: ${(result.confidence * 100).toFixed(0)}% — engine: ${result.engine}
         ${result.auto_trigger_sos ? "<br/>⚠️ Auto-triggering SOS..." : ""}
       `;
@@ -780,7 +780,7 @@ function initMap() {
     }
     const marker = L.circleMarker([e.latlng.lat, e.latlng.lng], {
       radius: 8,
-      fillColor: "#667eea",
+      fillColor: "#5B6CFF",
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -885,7 +885,7 @@ routeCheckBtn.addEventListener("click", async () => {
     <strong>Route Safety Assessment:</strong><br/>
     Distance: ${result.distance} km<br/>
     Estimated Safety Score: ${result.estimated_score}/100<br/>
-    Status: <span style="color: ${result.estimated_score >= 75 ? "#2dd4bf" : result.estimated_score >= 45 ? "#ffb020" : "#ff4757"}">
+    Status: <span style="color: ${result.estimated_score >= 75 ? "#22C55E" : result.estimated_score >= 45 ? "#F59E0B" : "#EF4444"}">
       ${result.estimated_score >= 75 ? "Safe" : result.estimated_score >= 45 ? "Caution" : "High Risk"}
     </span>
   `;
@@ -1010,7 +1010,7 @@ shareLocationBtn.addEventListener("click", async () => {
   if (bubbleMap) {
     const marker = L.circleMarker([loc.latitude, loc.longitude], {
       radius: 10,
-      fillColor: "#2dd4bf",
+      fillColor: "#22C55E",
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -1043,13 +1043,13 @@ function drawBreadcrumb() {
   if (!bubbleMap || breadcrumbTrail.length === 0) return;
 
   if (breadcrumbPolyline) bubbleMap.removeLayer(breadcrumbPolyline);
-  breadcrumbPolyline = L.polyline(breadcrumbTrail, { color: "#667eea", weight: 3, opacity: 0.7 }).addTo(bubbleMap);
+  breadcrumbPolyline = L.polyline(breadcrumbTrail, { color: "#5B6CFF", weight: 3, opacity: 0.7 }).addTo(bubbleMap);
 
   const latest = breadcrumbTrail[breadcrumbTrail.length - 1];
   if (liveDotMarker) bubbleMap.removeLayer(liveDotMarker);
   liveDotMarker = L.circleMarker(latest, {
     radius: 8,
-    fillColor: "#2dd4bf",
+    fillColor: "#22C55E",
     color: "#fff",
     weight: 2,
     opacity: 1,
@@ -1212,7 +1212,7 @@ function updateTrackedLocationOnMap(data) {
   } else {
     trackedMarker = L.circleMarker([data.latitude, data.longitude], {
       radius: 10,
-      fillColor: "#ff4757",
+      fillColor: "#EF4444",
       color: "#fff",
       weight: 2,
       opacity: 1,
