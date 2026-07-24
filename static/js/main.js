@@ -59,9 +59,9 @@ function getLocation() {
 }
 
 function scoreColor(score) {
-  if (score >= 75) return "#22C55E";
-  if (score >= 45) return "#F59E0B";
-  return "#EF4444";
+  if (score >= 75) return "#2dd4bf";
+  if (score >= 45) return "#ffb020";
+  return "#ff4757";
 }
 
 // ---------------------------------------------------------------------------
@@ -184,17 +184,17 @@ style.textContent = `
   }
   
   .notification-critical {
-    background: #EF4444;
+    background: #ff4757;
     color: white;
   }
   
   .notification-warning {
-    background: #F59E0B;
+    background: #ffb020;
     color: white;
   }
   
   .notification-info {
-    background: #5B6CFF;
+    background: #667eea;
     color: white;
   }
 `;
@@ -224,23 +224,6 @@ function activateTab(btn) {
   Object.values(tabPanels).forEach((p) => p.classList.add("hidden"));
   tabPanels[btn.dataset.tab].classList.remove("hidden");
 
-<<<<<<< HEAD
-    const heroEl = document.getElementById("tab-home-hero");
-    if (heroEl) heroEl.classList.toggle("hidden", btn.dataset.tab !== "home");
-
-    if (btn.dataset.tab === "map") {
-      setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
-    }
-    if (btn.dataset.tab === "directory") {
-      loadServices(currentServiceFilter);
-    }
-    if (btn.dataset.tab === "guardian") {
-      setTimeout(() => bubbleMap && bubbleMap.invalidateSize(), 50);
-    }
-    if (btn.dataset.tab === "community") {
-      loadFeed();
-    }
-=======
   if (btn.dataset.tab === "map") {
     setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
   }
@@ -272,7 +255,6 @@ tabButtons.forEach((btn, i) => {
     const nextBtn = tabButtons[nextIndex];
     nextBtn.focus();
     activateTab(nextBtn);
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
   });
 });
 
@@ -468,7 +450,7 @@ analyzeBtn.addEventListener("click", async () => {
 
     if (result.distress_detected) {
       distressResult.innerHTML = `
-        <span style="color:#EF4444">🚨 DISTRESS DETECTED</span><br/>
+        <span style="color:#ff4757">🚨 DISTRESS DETECTED</span><br/>
         Confidence: ${(result.confidence * 100).toFixed(0)}%<br/>
         Matched keywords: ${result.matched.join(", ")}
         ${result.auto_trigger_sos ? "<br/>⚠️ Auto-triggering SOS..." : ""}
@@ -667,7 +649,7 @@ async function classifyAudioWindow(windowSamples) {
 
     if (result.distress_detected) {
       audioMlResult.innerHTML = `
-        <span style="color:#EF4444">🚨 DISTRESS AUDIO DETECTED (${result.distress_type})</span><br/>
+        <span style="color:#ff4757">🚨 DISTRESS AUDIO DETECTED (${result.distress_type})</span><br/>
         Confidence: ${(result.confidence * 100).toFixed(0)}% — engine: ${result.engine}
         ${result.auto_trigger_sos ? "<br/>⚠️ Auto-triggering SOS..." : ""}
       `;
@@ -884,7 +866,7 @@ function initMap() {
     }
     const marker = L.circleMarker([e.latlng.lat, e.latlng.lng], {
       radius: 8,
-      fillColor: "#5B6CFF",
+      fillColor: "#667eea",
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -989,7 +971,7 @@ routeCheckBtn.addEventListener("click", async () => {
     <strong>Route Safety Assessment:</strong><br/>
     Distance: ${result.distance} km<br/>
     Estimated Safety Score: ${result.estimated_score}/100<br/>
-    Status: <span style="color: ${result.estimated_score >= 75 ? "#22C55E" : result.estimated_score >= 45 ? "#F59E0B" : "#EF4444"}">
+    Status: <span style="color: ${result.estimated_score >= 75 ? "#2dd4bf" : result.estimated_score >= 45 ? "#ffb020" : "#ff4757"}">
       ${result.estimated_score >= 75 ? "Safe" : result.estimated_score >= 45 ? "Caution" : "High Risk"}
     </span>
   `;
@@ -1124,7 +1106,7 @@ shareLocationBtn.addEventListener("click", async () => {
   if (bubbleMap) {
     const marker = L.circleMarker([loc.latitude, loc.longitude], {
       radius: 10,
-      fillColor: "#22C55E",
+      fillColor: "#2dd4bf",
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -1157,13 +1139,13 @@ function drawBreadcrumb() {
   if (!bubbleMap || breadcrumbTrail.length === 0) return;
 
   if (breadcrumbPolyline) bubbleMap.removeLayer(breadcrumbPolyline);
-  breadcrumbPolyline = L.polyline(breadcrumbTrail, { color: "#5B6CFF", weight: 3, opacity: 0.7 }).addTo(bubbleMap);
+  breadcrumbPolyline = L.polyline(breadcrumbTrail, { color: "#667eea", weight: 3, opacity: 0.7 }).addTo(bubbleMap);
 
   const latest = breadcrumbTrail[breadcrumbTrail.length - 1];
   if (liveDotMarker) bubbleMap.removeLayer(liveDotMarker);
   liveDotMarker = L.circleMarker(latest, {
     radius: 8,
-    fillColor: "#22C55E",
+    fillColor: "#2dd4bf",
     color: "#fff",
     weight: 2,
     opacity: 1,
@@ -1231,13 +1213,8 @@ const sendInviteBtn = document.getElementById("sendInviteBtn");
 const incomingInvitesList = document.getElementById("incomingInvitesList");
 const canTrackMeList = document.getElementById("canTrackMeList");
 const trackableSelect = document.getElementById("trackableSelect");
-<<<<<<< HEAD
-const bubbleViewBtn = document.getElementById("bubbleViewBtn");
-const bubbleStopViewBtn = document.getElementById("bubbleStopViewBtn");
-=======
 const viewTrackingBtn = document.getElementById("viewTrackingBtn");
 const stopViewTrackingBtn = document.getElementById("stopViewTrackingBtn");
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 
 let currentlyTrackingUserId = null;
 let trackedMarker = null;
@@ -1271,11 +1248,7 @@ async function loadLinkedContacts() {
   trackableSelect.innerHTML = accepted.length
     ? accepted.map((r) => `<option value="${r.owner_user_id}">${r.owner_email}</option>`).join("")
     : `<option value="">No accepted Bubble members yet</option>`;
-<<<<<<< HEAD
-  bubbleViewBtn.disabled = accepted.length === 0;
-=======
   viewTrackingBtn.disabled = accepted.length === 0;
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 }
 
 window.respondToInvite = async (inviteId, accept) => {
@@ -1300,28 +1273,16 @@ sendInviteBtn?.addEventListener("click", async () => {
   }
 });
 
-<<<<<<< HEAD
-bubbleViewBtn?.addEventListener("click", () => {
-=======
 viewTrackingBtn?.addEventListener("click", () => {
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
   const targetUserId = parseInt(trackableSelect.value, 10);
   if (!targetUserId) return;
   currentlyTrackingUserId = targetUserId;
   socket.emit("join_tracking", { user_id: targetUserId });
-<<<<<<< HEAD
-  bubbleViewBtn.classList.add("hidden");
-  bubbleStopViewBtn.classList.remove("hidden");
-});
-
-bubbleStopViewBtn?.addEventListener("click", () => {
-=======
   viewTrackingBtn.classList.add("hidden");
   stopViewTrackingBtn.classList.remove("hidden");
 });
 
 stopViewTrackingBtn?.addEventListener("click", () => {
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
   stopTrackingUI();
 });
 
@@ -1334,13 +1295,8 @@ function stopTrackingUI() {
     bubbleMap.removeLayer(trackedMarker);
     trackedMarker = null;
   }
-<<<<<<< HEAD
-  bubbleViewBtn?.classList.remove("hidden");
-  bubbleStopViewBtn?.classList.add("hidden");
-=======
   viewTrackingBtn?.classList.remove("hidden");
   stopViewTrackingBtn?.classList.add("hidden");
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 }
 
 function updateTrackedLocationOnMap(data) {
@@ -1352,11 +1308,7 @@ function updateTrackedLocationOnMap(data) {
   } else {
     trackedMarker = L.circleMarker([data.latitude, data.longitude], {
       radius: 10,
-<<<<<<< HEAD
-      fillColor: "#EF4444",
-=======
       fillColor: "#ff4757",
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
       color: "#fff",
       weight: 2,
       opacity: 1,
@@ -1534,115 +1486,6 @@ window.addEventListener("online", () => {
 updateOfflineBanner();
 syncOfflineQueue(); // in case there were queued actions from a previous offline session
 // ---------------------------------------------------------------------------
-<<<<<<< HEAD
-// PREMIUM UI LAYER — purely visual. Adds no new routes, changes no existing
-// behaviour, and never blocks if an element is missing (e.g. other tabs).
-// ---------------------------------------------------------------------------
-(function premiumUILayer() {
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  // --- Navbar shrink on scroll ---------------------------------------------
-  const topbar = document.querySelector(".topbar");
-  if (topbar) {
-    const onScroll = () => topbar.classList.toggle("is-scrolled", window.scrollY > 24);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-  }
-
-  // --- Scroll-reveal for cards ---------------------------------------------
-  const revealEls = document.querySelectorAll(".reveal");
-  if (revealEls.length) {
-    if (reduceMotion || !("IntersectionObserver" in window)) {
-      revealEls.forEach((el) => el.classList.add("in-view"));
-    } else {
-      const io = new IntersectionObserver(
-        (entries) => {
-          entries.forEach((entry, i) => {
-            if (entry.isIntersecting) {
-              setTimeout(() => entry.target.classList.add("in-view"), i * 60);
-              io.unobserve(entry.target);
-            }
-          });
-        },
-        { threshold: 0.15, rootMargin: "0px 0px -40px 0px" }
-      );
-      revealEls.forEach((el) => io.observe(el));
-    }
-  }
-
-  // Re-trigger reveal for cards inside a tab that becomes visible again
-  // (tab-panels start hidden via CSS `display:none`, so IO only fires once
-  // they're actually laid out — re-observe on tab click just in case).
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      requestAnimationFrame(() => {
-        document.querySelectorAll(".reveal:not(.in-view)").forEach((el) => {
-          const rect = el.getBoundingClientRect();
-          if (rect.top < window.innerHeight) el.classList.add("in-view");
-        });
-      });
-    });
-  });
-
-  // --- Hero particle field (floating dots + drifting connective lines,
-  //     evoking GPS pings / a live-tracking network) ------------------------
-  const canvas = document.getElementById("heroParticles");
-  if (canvas && !reduceMotion) {
-    const ctx = canvas.getContext("2d");
-    let w, h, particles;
-    const COLORS = ["rgba(139,92,246,0.8)", "rgba(34,211,238,0.75)", "rgba(236,72,153,0.7)"];
-
-    function resize() {
-      const rect = canvas.parentElement.getBoundingClientRect();
-      w = canvas.width = rect.width + 48;
-      h = canvas.height = rect.height + 80;
-      const count = Math.min(46, Math.floor((w * h) / 16000));
-      particles = Array.from({ length: count }, () => ({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        r: 1 + Math.random() * 2,
-        vx: (Math.random() - 0.5) * 0.25,
-        vy: (Math.random() - 0.5) * 0.25,
-        c: COLORS[Math.floor(Math.random() * COLORS.length)],
-      }));
-    }
-
-    function tick() {
-      ctx.clearRect(0, 0, w, h);
-      for (const p of particles) {
-        p.x += p.vx; p.y += p.vy;
-        if (p.x < 0 || p.x > w) p.vx *= -1;
-        if (p.y < 0 || p.y > h) p.vy *= -1;
-      }
-      for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const a = particles[i], b = particles[j];
-          const d = Math.hypot(a.x - b.x, a.y - b.y);
-          if (d < 120) {
-            ctx.strokeStyle = `rgba(139,92,246,${0.14 * (1 - d / 120)})`;
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(a.x, a.y);
-            ctx.lineTo(b.x, b.y);
-            ctx.stroke();
-          }
-        }
-      }
-      for (const p of particles) {
-        ctx.beginPath();
-        ctx.fillStyle = p.c;
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      requestAnimationFrame(tick);
-    }
-
-    resize();
-    window.addEventListener("resize", resize, { passive: true });
-    tick();
-  }
-})();
-=======
 // TIER 3 PART 3: Real Web Push (works even when the tab is closed)
 // ---------------------------------------------------------------------------
 const enablePushBtn = document.getElementById("enablePushBtn");
@@ -1757,4 +1600,3 @@ disablePushBtn?.addEventListener("click", disablePush);
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.ready.then(refreshPushUI).catch(() => {});
 }
->>>>>>> 12f0b65 (Updated SafeHer features and UI)

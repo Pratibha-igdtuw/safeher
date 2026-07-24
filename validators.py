@@ -183,8 +183,6 @@ class FeedPostSchema(Schema):
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
-=======
 # TIER 3 PART 3: Web Push + client-side error reporting
 # ---------------------------------------------------------------------------
 class PushKeysSchema(Schema):
@@ -230,7 +228,6 @@ class ClientErrorSchema(Schema):
 
 
 # ---------------------------------------------------------------------------
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 # Decorator
 # ---------------------------------------------------------------------------
 def validate_json(schema_cls):

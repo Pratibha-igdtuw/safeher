@@ -5,22 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>SafeHer — AI Guardian for Women's Safety</title>
 <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}" />
-<meta name="theme-color" content="#5B6CFF" />
+<meta name="theme-color" content="#667eea" />
 <link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-<<<<<<< HEAD
-<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
-<!-- FEATURE 4: WebSocket for real-time notifications -->
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-=======
 <!-- FEATURE 4: WebSocket for real-time notifications.
      onerror flips a flag main.js checks before calling io(), so a blocked/
      failed CDN degrades real-time alerts gracefully instead of throwing a
      ReferenceError that would halt the rest of main.js. -->
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js" onerror="window.__SAFEHER_CDN_FAILED = window.__SAFEHER_CDN_FAILED || {}; window.__SAFEHER_CDN_FAILED.socketio = true;"></script>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 <!-- TIER 1 FEATURE 1: TensorFlow.js — used client-side only to capture mic
      audio and compute a log-mel spectrogram; the actual YAMNet inference
      runs server-side in /api/audio-classify (see static/js/main.js and
@@ -50,92 +44,22 @@
     {% if is_admin %}
     <a href="/admin" class="admin-nav-link">📊 Admin</a>
     {% endif %}
-    <a href="/logout" class="admin-nav-link">Logout</a>
+    <a href="/logout" style="color:white; text-decoration:none; padding:8px 12px; border:1px solid rgba(255,255,255,0.3); border-radius:4px; font-size:13px; margin-left:8px;">Logout</a>
   </nav>
 </header>
-
-<!-- ============================= HOME TAB HERO + QUICK ACTIONS ============================= -->
-<div id="tab-home-hero">
-  <section class="hero">
-    <canvas id="heroParticles" class="hero-particles" aria-hidden="true"></canvas>
-
-    <div class="hero-copy">
-      <p class="hero-eyebrow">AI Guardian · Always On</p>
-      <h1>Your safety net, wrapped around every step.</h1>
-      <p>
-        One tap for SOS, a private circle that can see where you are,
-        and quiet tools — fake calls, voice distress detection,
-        evidence recording — for the moments that need them.
-      </p>
-
-      <div class="hero-stats">
-        <div class="hero-stat">
-          <div class="num">&lt; 2s</div>
-          <div class="lbl">SOS dispatch</div>
-        </div>
-        <div class="hero-stat">
-          <div class="num">6-point</div>
-          <div class="lbl">Route scoring</div>
-        </div>
-        <div class="hero-stat">
-          <div class="num">24/7</div>
-          <div class="lbl">Guardian circle</div>
-        </div>
-      </div>
-    </div>
-    </div>
-    <div class="orb-stage" aria-hidden="true">
-      <div class="guardian-orb">
-        <div class="orb-core"></div>
-        <div class="orb-ring r1"></div>
-        <div class="orb-ring r2"></div>
-        <div class="orb-ring r3"></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================= QUICK ACTIONS ============================= -->
-  <div class="quick-actions">
-    <a class="quick-tile" href="#sos-fab-anchor" onclick="document.getElementById('sosBtn').focus();">
-      <span class="icon" data-lucide="siren"></span>
-      <div class="label">SOS</div>
-      <div class="sub">Always on, bottom right</div>
-    </a>
-    <a class="quick-tile" href="#fakeCallCard">
-      <span class="icon" data-lucide="phone-incoming"></span>
-      <div class="label">Fake Call</div>
-      <div class="sub">Exit a situation</div>
-    </a>
-    <a class="quick-tile" href="#checkinCard">
-      <span class="icon" data-lucide="timer"></span>
-      <div class="label">Check-In</div>
-      <div class="sub">Set a safety timer</div>
-    </a>
-    <a class="quick-tile" href="javascript:void(0)" onclick="document.querySelector('[data-tab=directory]').click(); document.querySelector('[data-tab=directory]').scrollIntoView({behavior:'smooth', block:'center'});">
-      <span class="icon" data-lucide="map-pin"></span>
-      <div class="label">Directory</div>
-      <div class="sub">Police, hospitals, help</div>
-    </a>
-  </div>
-
-  <p class="section-label">Safety tools</p>
-</div>
 
 <!-- ============================= HOME TAB ============================= -->
 <main id="tab-home" class="grid tab-panel" role="tabpanel" aria-labelledby="tabbtn-home">
 
-  <section class="card sos-card reveal">
+  <section class="card sos-card">
     <h2>Emergency SOS</h2>
     <p class="muted">One tap sends your live location + alert to all trusted contacts.</p>
     <button id="sosBtn" class="sos-button" aria-label="Send emergency SOS alert to trusted contacts">SOS</button>
     <p id="sosStatus" class="status-line" role="status" aria-live="assertive" aria-atomic="true"></p>
   </section>
 
-<section class="card reveal" id="fakeCallCard">
-  <h2>
-    <span data-lucide="phone-incoming" style="width:18px;height:18px;"></span>
-    Fake Call
-  </h2>
+  <section class="card">
+    <h2>Fake Call</h2>
     <p class="muted">Trigger a realistic incoming call to exit an uncomfortable situation.</p>
     <div class="row">
       <select id="fakeCallDelay" aria-label="Delay before fake call rings">
@@ -149,11 +73,8 @@
     <p id="fakeCallStatus" class="status-line"></p>
   </section>
 
-<section class="card reveal" id="voiceCard">
-  <h2>
-    <span data-lucide="mic" style="width:18px;height:18px;"></span>
-    Voice Distress Detection
-  </h2>
+  <section class="card">
+    <h2>Voice Distress Detection</h2>
     <p class="muted">Speak, or type what would be transcribed. The AI model scans for distress patterns.</p>
     <div class="row">
       <button id="listenBtn" class="btn">🎙️ Start Listening</button>
@@ -177,11 +98,8 @@
     <p id="audioMlResult" class="status-line"></p>
   </section>
 
-<section class="card reveal" id="checkinCard">
-  <h2>
-    <span data-lucide="timer" style="width:18px;height:18px;"></span>
-    Safe Check-in Timer
-  </h2>
+  <section class="card">
+    <h2>Safe Check-in Timer</h2>
     <p class="muted">Set a timer. If you don't check in before it ends, contacts get alerted automatically.</p>
     <div class="row">
       <input id="checkinMinutes" type="number" min="1" value="1" aria-label="Check-in timer minutes" />
@@ -192,11 +110,8 @@
     <button id="confirmSafeBtn" class="btn safe-btn" disabled>I'm Safe ✔</button>
   </section>
 
-<section class="card reveal">
-  <h2>
-    <span data-lucide="disc" style="width:18px;height:18px;"></span>
-    Anonymous Record
-  </h2>
+  <section class="card">
+    <h2>Anonymous Record</h2>
     <p class="muted">Silently capture audio evidence — no alert is sent to anyone, nothing leaves your device.</p>
     <div class="row">
       <button id="recordBtn" class="btn">⏺ Start Recording</button>
@@ -207,21 +122,11 @@
     <a id="downloadRecordingLink" class="hidden" download="safeher-recording.webm">Download recording</a>
   </section>
 
-<section class="card reveal">
-  <h2>
-    <span data-lucide="activity" style="width:18px;height:18px;"></span>
-    Recent Alerts
-  </h2>
-  <ul id="alertsList" class="alerts-list"></ul>
-</section>
+  <section class="card">
+    <h2>Recent Alerts</h2>
+    <ul id="alertsList" class="alerts-list"></ul>
+  </section>
 
-<<<<<<< HEAD
-<section class="card reveal" id="twoFaCard">
-  <h2>
-    <span data-lucide="shield-check" style="width:18px;height:18px;"></span>
-    Account Security — 2FA
-  </h2>
-=======
   <section class="card" id="pushCard">
     <h2>Push Notifications</h2>
     <p class="muted">Get SOS, high-risk-area, and check-in alerts as native notifications — even when this tab is closed.</p>
@@ -232,7 +137,6 @@
 
   <section class="card" id="twoFaCard">
     <h2>Account Security — 2FA</h2>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Add an authenticator app (Google/Microsoft Authenticator) as a second login step.</p>
     <p id="twoFaStatus" class="status-line"></p>
 
@@ -265,7 +169,7 @@
   <div class="map-layout">
 
     <div class="map-side card">
-      <h2><span data-lucide="map" style="width:19px;height:19px;"></span> Safety Score Map</h2>
+      <h2>Safety Score Map</h2>
       <p class="muted">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits.</p>
 
       <div class="legend">
@@ -291,11 +195,7 @@
 <!-- AUDIT MODAL -->
 <div id="auditModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auditModalTitle">
   <div class="modal-box">
-<<<<<<< HEAD
-    <h2><span data-lucide="clipboard-check" style="width:19px;height:19px;"></span> Safety Audit</h2>
-=======
     <h2 id="auditModalTitle">Safety Audit</h2>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Rate this spot on 6 quick parameters (0 = poor, 4 = excellent) — SafetiPin's audit model.</p>
     <input id="auditAreaName" type="text" placeholder="Area name (optional)" />
 
@@ -318,18 +218,9 @@
 </div>
 
 <!-- ============================= DIRECTORY TAB ============================= -->
-<<<<<<< HEAD
-<main id="tab-directory" class="tab-panel hidden">
-<section class="card reveal">
-  <h2>
-    <span data-lucide="building-2" style="width:19px;height:19px;"></span>
-    Nearby Safety Services
-  </h2>
-=======
 <main id="tab-directory" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-directory">
   <section class="card">
     <h2>Nearby Safety Services</h2>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Police stations, hospitals, pharmacies, and helplines closest to you.</p>
     <div class="row">
       <button class="btn filter-btn active" data-type="">All</button>
@@ -346,7 +237,7 @@
 <main id="tab-guardian" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-guardian">
   <div class="map-layout">
     <div class="map-side card">
-      <h2><span data-lucide="users" style="width:19px;height:19px;"></span> Bubble</h2>
+      <h2>Bubble</h2>
       <p class="muted">Your private circle — like I'M SAFE's Bubble. Everyone in it can see your live location on one map when sharing is on.</p>
 
       <button id="shareLocationBtn" class="btn safe-btn">Start Sharing</button>
@@ -394,15 +285,9 @@
 
       <h3 style="margin-top:14px; font-size:14px;">Track a Bubble member</h3>
       <div class="row">
-<<<<<<< HEAD
-        <select id="trackableSelect"></select>
-        <button id="startTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
-        <button id="stopTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
-=======
         <select id="trackableSelect" aria-label="Bubble member to view live location for"></select>
         <button id="viewTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
         <button id="stopViewTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
       </div>
     </div>
 
@@ -413,18 +298,9 @@
 </main>
 
 <!-- ============================= COMMUNITY TAB ============================= -->
-<<<<<<< HEAD
-<main id="tab-community" class="tab-panel hidden">
-<section class="card reveal">
-  <h2>
-    <span data-lucide="megaphone" style="width:19px;height:19px;"></span>
-    Community Safety Feed
-  </h2>
-=======
 <main id="tab-community" class="tab-panel hidden" role="tabpanel" aria-labelledby="tabbtn-community">
   <section class="card">
     <h2>Community Safety Feed</h2>
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
     <p class="muted">Share and see real-time safety alerts and safe-spot tips from people nearby — like I'M SAFE's Community Feed.</p>
 
     <div class="row">
@@ -441,35 +317,6 @@
     <ul id="feedList" class="alerts-list" style="margin-top:16px; max-height:420px;"></ul>
   </section>
 </main>
-
-<!-- Floating SOS button — always visible, per redesign brief. The real
-     #sosBtn / #sosStatus elements live in the (visually hidden) sos-card
-     above so main.js's getElementById calls keep working; this script just
-     relocates that same DOM node into the floating widget on load. -->
-<div class="sos-fab-wrap">
-  <p class="sos-toast" id="sosToastMirror"></p>
-</div>
-<script>
-  (function () {
-    var wrap = document.querySelector(".sos-fab-wrap");
-    var card = document.querySelector(".sos-card");
-    if (wrap && card) {
-      var btn = card.querySelector("#sosBtn");
-      var status = card.querySelector("#sosStatus");
-      if (btn) wrap.insertBefore(btn, wrap.firstChild);
-      if (status) {
-        status.classList.add("hidden");
-        wrap.appendChild(status);
-        var mirror = document.getElementById("sosToastMirror");
-        var mo = new MutationObserver(function () {
-          mirror.textContent = status.textContent;
-          mirror.classList.toggle("show", status.textContent.trim().length > 0);
-        });
-        mo.observe(status, { childList: true, characterData: true, subtree: true });
-      }
-    }
-  })();
-</script>
 
 <!-- FAKE CALL OVERLAY -->
 <div id="fakeCallOverlay" class="fake-call-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="callerName" aria-describedby="fakeCallRinging">
@@ -533,12 +380,6 @@
   })();
 </script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-<script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
-<script>
-  if (window.lucide) {
-    lucide.createIcons();
-  }
-</script>
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
