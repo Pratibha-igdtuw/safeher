@@ -36,8 +36,14 @@ async function api(path, options = {}) {
       // leave auth redirects/handling to the caller — don't spam a toast
     } else if (res.status === 403) {
       showNotification("🚫 Not allowed", body.error === "unauthorized" ? "You don't have access to that." : (body.message || "Action not permitted."), "warning");
+    } else if (res.status === 404) {
+      showNotification("⚠️ Not found", body.error || body.message || "That wasn't found.", "warning");
+    } else if (res.status === 409) {
+      showNotification("⚠️ Already done", body.error || body.message || "That action was already completed.", "warning");
     } else if (res.status >= 500) {
       showNotification("⚠️ Server error", "Something went wrong on our end. Please try again shortly.", "critical");
+    } else if (res.status >= 400) {
+      showNotification("⚠️ Something went wrong", body.error || body.message || "Please try again.", "warning");
     }
   }
 
@@ -970,13 +976,17 @@ routeCheckBtn.addEventListener("click", async () => {
     body: JSON.stringify({ origin, destination }),
   });
 
+  if (!result._ok) {
+    routeResult.textContent = "Couldn't check that route. Please try again.";
+    return;
+  }
+
+  const scoreColorFor = result.color === "green" ? "#22C55E" : result.color === "orange" ? "#F59E0B" : "#EF4444";
   routeResult.innerHTML = `
     <strong>Route Safety Assessment:</strong><br/>
-    Distance: ${result.distance} km<br/>
-    Estimated Safety Score: ${result.estimated_score}/100<br/>
-    Status: <span style="color: ${result.estimated_score >= 75 ? "#22C55E" : result.estimated_score >= 45 ? "#F59E0B" : "#EF4444"}">
-      ${result.estimated_score >= 75 ? "Safe" : result.estimated_score >= 45 ? "Caution" : "High Risk"}
-    </span>
+    ${result.origin} → ${result.destination}<br/>
+    Estimated Safety Score: ${result.score}/100<br/>
+    Status: <span style="color: ${scoreColorFor}">${result.rating}</span>
   `;
 });
 
