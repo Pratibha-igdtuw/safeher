@@ -8,6 +8,9 @@
 <meta name="theme-color" content="#8b5cf6" />
 <link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 <!-- FEATURE 4: WebSocket for real-time notifications -->
@@ -357,6 +360,9 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<!-- FEATURE 4: WebSocket for real-time notifications -->
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
 <script src="{{ url_for('static', filename='js/scroll-reveal.js') }}"></script>
