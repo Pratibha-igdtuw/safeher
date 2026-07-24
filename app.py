@@ -324,6 +324,7 @@ def init_db():
             name TEXT NOT NULL,
             phone TEXT NOT NULL,
             relation TEXT,
+            email TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
@@ -459,6 +460,11 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
     if "totp_enabled" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+
+    # --- Migration: add email column to contacts if missing ---
+    contact_cols = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
+    if "email" not in contact_cols:
+        conn.execute("ALTER TABLE contacts ADD COLUMN email TEXT")
 
     conn.commit()
     conn.close()
@@ -792,11 +798,12 @@ def add_contact():
     name = data["name"].strip()
     phone = data["phone"].strip()
     relation = data.get("relation", "").strip()
+    email = data.get("email", "").strip()
 
     conn = get_db()
     conn.execute(
-        "INSERT INTO contacts (user_id, name, phone, relation, created_at) VALUES (?, ?, ?, ?, ?)",
-        (current_user.id, name, phone, relation, datetime.utcnow().isoformat()),
+        "INSERT INTO contacts (user_id, name, phone, relation, email, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (current_user.id, name, phone, relation, email, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()

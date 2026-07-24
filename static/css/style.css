@@ -524,6 +524,28 @@ textarea {
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn.secondary { background: transparent; }
 
+.tel-call-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  background: linear-gradient(135deg, var(--coral), #e11d48);
+  border: 1px solid transparent;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex: none;
+  width: auto;
+  height: auto;
+}
+.tel-call-btn:hover {
+  box-shadow: 0 14px 28px -10px rgba(244,63,94,0.65);
+  transform: translateY(-1px);
+}
+
 .filter-btn.active {
   border-color: var(--cyan);
   color: var(--cyan);
@@ -979,6 +1001,11 @@ textarea {
   text-align: center;
   font-size: 12px;
   color: var(--muted);
+}
+
+#emergencyHelplinesList {
+  max-height: none;
+  overflow: visible;
 }
 
 @media (prefers-reduced-motion: reduce) {

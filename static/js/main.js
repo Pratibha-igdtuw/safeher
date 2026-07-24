@@ -996,6 +996,36 @@ setTimeout(initMap, 100);
 // ---------------------------------------------------------------------------
 // Directory / Nearby Services
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// National Emergency Helplines (India) — static, click-to-call
+// ---------------------------------------------------------------------------
+const INDIA_EMERGENCY_NUMBERS = [
+  { name: "All-in-One Emergency (Police/Fire/Ambulance)", number: "112" },
+  { name: "Police", number: "100" },
+  { name: "Women Helpline", number: "1091" },
+  { name: "Women Helpline (Domestic Abuse)", number: "181" },
+  { name: "Ambulance", number: "102" },
+  { name: "Fire", number: "101" },
+  { name: "Child Helpline", number: "1098" },
+  { name: "National Commission for Women", number: "7827170170" },
+  { name: "Cyber Crime Helpline", number: "1930" },
+  { name: "Disaster Management", number: "108" },
+];
+
+function renderEmergencyHelplines() {
+  const list = document.getElementById("emergencyHelplinesList");
+  if (!list) return;
+  list.innerHTML = INDIA_EMERGENCY_NUMBERS.map(
+    (e) =>
+      `<li style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <span><strong>${e.name}</strong><br/><span style="font-size:11px; color:#888;">${e.number}</span></span>
+        <a href="tel:${e.number}" class="tel-call-btn">Call</a>
+      </li>`
+  ).join("");
+}
+
+renderEmergencyHelplines();
+
 const servicesList = document.getElementById("servicesList");
 const filterBtns = document.querySelectorAll(".filter-btn");
 let currentServiceFilter = "";
@@ -1024,7 +1054,14 @@ async function loadServices(serviceType) {
   servicesList.innerHTML = results
     .map(
       (s) =>
-        `<li><strong>${s.name}</strong> (${s.type})<br/><span style="font-size:11px; color:#888;">${s.address}</span></li>`
+        `<li style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <span><strong>${s.name}</strong> (${s.type})<br/><span style="font-size:11px; color:#888;">${s.address}</span></span>
+          ${
+            s.phone && s.phone !== "N/A"
+              ? `<a href="tel:${s.phone}" class="tel-call-btn">Call</a>`
+              : ""
+          }
+        </li>`
     )
     .join("");
 }
@@ -1038,6 +1075,7 @@ const stopSharingBtn = document.getElementById("stopSharingBtn");
 const guardianStatus = document.getElementById("guardianStatus");
 const contactName = document.getElementById("contactName");
 const contactPhone = document.getElementById("contactPhone");
+const contactEmail = document.getElementById("contactEmail");
 const contactRelation = document.getElementById("contactRelation");
 const addContactBtn = document.getElementById("addContactBtn");
 const contactsList = document.getElementById("contactsList");
@@ -1064,7 +1102,7 @@ async function loadContacts() {
   contactsList.innerHTML = contacts
     .map(
       (c) =>
-        `<li><strong>${c.name}</strong> (${c.relation || "contact"})<br/><span style="font-size:11px; color:#888;">${c.phone}</span>
+        `<li><strong>${c.name}</strong> (${c.relation || "contact"})<br/><span style="font-size:11px; color:#888;">${c.phone}${c.email ? " · " + c.email : ""}</span>
         <button style="float:right; padding:4px 8px; font-size:11px; cursor:pointer;" onclick="deleteContact(${c.id})">Delete</button></li>`
     )
     .join("");
@@ -1078,6 +1116,7 @@ window.deleteContact = async (id) => {
 addContactBtn.addEventListener("click", async () => {
   const name = contactName.value.trim();
   const phone = contactPhone.value.trim();
+  const email = contactEmail.value.trim();
   const relation = contactRelation.value.trim();
 
   if (!name || !phone) {
@@ -1087,11 +1126,12 @@ addContactBtn.addEventListener("click", async () => {
 
   await api("/api/contacts", {
     method: "POST",
-    body: JSON.stringify({ name, phone, relation }),
+    body: JSON.stringify({ name, phone, email, relation }),
   });
 
   contactName.value = "";
   contactPhone.value = "";
+  contactEmail.value = "";
   contactRelation.value = "";
   loadContacts();
 });

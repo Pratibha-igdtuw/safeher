@@ -84,6 +84,7 @@ class ContactSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=120))
     phone = fields.Str(required=True, validate=validate.Length(min=1, max=30))
     relation = fields.Str(load_default="", validate=validate.Length(max=60))
+    email = fields.Str(load_default="", validate=validate.Length(max=255))
 
 
 class ContactInviteSchema(Schema):
