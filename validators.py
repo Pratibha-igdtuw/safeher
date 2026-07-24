@@ -183,51 +183,6 @@ class FeedPostSchema(Schema):
 
 
 # ---------------------------------------------------------------------------
-# TIER 3 PART 3: Web Push + client-side error reporting
-# ---------------------------------------------------------------------------
-class PushKeysSchema(Schema):
-    class Meta:
-        unknown = EXCLUDE
-
-    p256dh = fields.Str(required=True, validate=validate.Length(min=1, max=500))
-    auth = fields.Str(required=True, validate=validate.Length(min=1, max=500))
-
-
-class PushSubscribeSchema(Schema):
-    class Meta:
-        unknown = EXCLUDE
-
-    endpoint = fields.Str(required=True, validate=validate.Length(min=1, max=2000))
-    keys = fields.Nested(PushKeysSchema, required=True)
-
-
-class PushUnsubscribeSchema(Schema):
-    class Meta:
-        unknown = EXCLUDE
-
-    endpoint = fields.Str(required=True, validate=validate.Length(min=1, max=2000))
-
-
-class ClientErrorSchema(Schema):
-    """Deliberately permissive/lenient — this endpoint's whole purpose is to
-    catch errors we didn't anticipate, so we don't want a strict schema
-    silently swallowing the very reports we're trying to collect. Every
-    field is optional and loosely bounded in length only."""
-
-    class Meta:
-        unknown = EXCLUDE
-
-    kind = _short_text(60)
-    message = _short_text(2000)
-    source = _short_text(500)
-    line = fields.Int(load_default=None, allow_none=True)
-    col = fields.Int(load_default=None, allow_none=True)
-    stack = fields.Str(load_default="", validate=validate.Length(max=4000))
-    url = _short_text(500)
-    ua = _short_text(500)
-
-
-# ---------------------------------------------------------------------------
 # Decorator
 # ---------------------------------------------------------------------------
 def validate_json(schema_cls):

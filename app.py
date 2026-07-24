@@ -57,12 +57,6 @@ from utils.distress_detector import check_distress
 from utils.safety_services import get_nearby_services
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
-from utils.push import (
-    send_push_to_user,
-    send_push_to_users,
-    get_vapid_public_key,
-    push_configured,
-)
 from validators import (
     validate_json,
     LoginSchema,
@@ -77,9 +71,6 @@ from validators import (
     CheckLocationRiskSchema,
     GuardianShareSchema,
     FeedPostSchema,
-    PushSubscribeSchema,
-    PushUnsubscribeSchema,
-    ClientErrorSchema,
 )
 
 from config import get_config
@@ -99,25 +90,13 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-# ---------------------------------------------------------------------------
-# TIER 3 PART 1: environment-driven config
-# ---------------------------------------------------------------------------
-# FLASK_ENV=production enables secure cookies + HTTPS-only headers.
-# Defaults to "development" so local `python app.py` still works over http.
-FLASK_ENV = os.environ.get("FLASK_ENV", "development").lower()
-IS_PRODUCTION = FLASK_ENV == "production"
-
-# Comma-separated allow-list, e.g. "https://safeher.app,https://www.safeher.app"
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://127.0.0.1:5000,http://localhost:5000").split(",")
-    if origin.strip()
-]
-
 app = Flask(__name__)
 app.config.from_object(get_config())
+
+DB_PATH = app.config["DATABASE_PATH"]  # kept for any code/tests referencing DB_PATH directly
+
+socketio = SocketIO(app, cors_allowed_origins=app.config["CORS_ORIGINS"])
 app.secret_key = os.environ.get("SECRET_KEY", "safeher-secret-key-change-in-production")
-DB_PATH = app.config["DATABASE_PATH"]
 
 # --- Secure session / cookie config ---
 app.config.update(
@@ -181,56 +160,6 @@ except ImportError:  # pragma: no cover - only hit if flask-talisman isn't insta
 logging.basicConfig(level=logging.INFO)
 security_logger = logging.getLogger("safeher.security")
 
-
-def configure_logging(flask_app):
-    """Configure console + rotating file logging for SafeHer."""
-    log_dir = flask_app.config["LOG_DIR"]
-    os.makedirs(log_dir, exist_ok=True)
-
-    log_level = getattr(
-        logging,
-        str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(),
-        logging.INFO,
-    )
-
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-
-    file_handler = RotatingFileHandler(
-        os.path.join(log_dir, "app.log"),
-        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
-        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(log_level)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(log_level)
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    root_logger.handlers = [file_handler, console_handler]
-
-    werkzeug_logger = logging.getLogger("werkzeug")
-    werkzeug_logger.handlers = [file_handler, console_handler]
-    werkzeug_logger.setLevel(log_level)
-
-    return logging.getLogger("safeher")
-
-
-logger = configure_logging(app)
-
-
-def hash_identifier(value):
-    """One-way hash of identifying values for audit-friendly logs."""
-    if value is None:
-        return "unknown"
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
-
-
 _failed_login_counts = defaultdict(int)
 
 
@@ -258,6 +187,74 @@ def handle_rate_limit(e):
     })
     resp.status_code = 429
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Structured logging (console + rotating file handler)
+# ---------------------------------------------------------------------------
+def configure_logging(flask_app):
+    """INFO for normal request/connect events, WARNING for failed logins
+    and invalid 2FA codes, ERROR for unhandled exceptions. Every SOS
+    trigger, failed login attempt, and 2FA failure is logged with a
+    timestamp + hashed user identifier — the audit trail a real safety
+    app needs."""
+    log_dir = flask_app.config["LOG_DIR"]
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_level = getattr(logging, str(flask_app.config.get("LOG_LEVEL", "INFO")).upper(), logging.INFO)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+    )
+
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "app.log"),
+        maxBytes=flask_app.config.get("LOG_MAX_BYTES", 1_000_000),
+        backupCount=flask_app.config.get("LOG_BACKUP_COUNT", 5),
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Avoid duplicate handlers if configure_logging() runs more than once
+    # (e.g. re-imported by tests).
+    root_logger.handlers = [file_handler, console_handler]
+
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.handlers = [file_handler, console_handler]
+    werkzeug_logger.setLevel(log_level)
+
+    return logging.getLogger("safeher")
+
+
+logger = configure_logging(app)
+
+
+def hash_identifier(value):
+    """One-way hash of an identifying value (email, user id) for audit
+    logs, so log files don't contain raw PII while still letting the same
+    user's events be correlated across log lines."""
+    if value is None:
+        return "unknown"
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(exc):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        # Let Flask's normal handling deal with expected HTTP errors
+        # (404s, etc.) instead of logging them as unhandled crashes.
+        return exc
+
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.path, exc, exc_info=True)
+    return jsonify({"error": "internal server error"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -445,18 +442,6 @@ def init_db():
             synced_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
-
-        -- ================= TIER 3 PART 3 =================
-
-        CREATE TABLE IF NOT EXISTS push_subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            endpoint TEXT UNIQUE NOT NULL,
-            p256dh TEXT NOT NULL,
-            auth TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
         """
     )
     conn.commit()
@@ -486,18 +471,7 @@ def init_db():
 def index():
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
-    return render_template("landing.html")
-
-
-def _login_rate_limit_key():
-    """5 attempts per 15 min per IP + email combination."""
-    email = ""
-    try:
-        body = request.get_json(silent=True) or {}
-        email = (body.get("email") or "").strip().lower()
-    except Exception:
-        pass
-    return f"{get_remote_address()}:{email}"
+    return redirect(url_for("login"))
 
 
 def _login_rate_limit_key():
@@ -541,6 +515,7 @@ def login():
             logger.info("Successful login: user=%s", hash_identifier(email))
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
         else:
+            logger.warning("Failed login attempt: user=%s", hash_identifier(email))
             log_failed_login(email, ip)
             return jsonify({"error": "invalid email or password"}), 401
 
@@ -872,20 +847,6 @@ def is_accepted_linked_contact(conn, owner_user_id, viewer_user_id):
     return row is not None
 
 
-def get_push_recipients(conn, owner_user_id):
-    """TIER 3 PART 3: who should get a native push for owner_user_id's SOS /
-    risk / check-in events. That's the account holder themselves (so they
-    get confirmation even if they background the app right after tapping
-    SOS) plus every Bubble member who has accepted an invite to track them
-    — the phone-number `contacts` table is SMS-only and has no SafeHer
-    account to hold a push subscription."""
-    viewers = conn.execute(
-        "SELECT contact_user_id FROM linked_contacts WHERE user_id = ? AND status = 'accepted'",
-        (owner_user_id,),
-    ).fetchall()
-    return [owner_user_id] + [row["contact_user_id"] for row in viewers]
-
-
 @app.route("/api/contacts/invite", methods=["POST"])
 @login_required
 @validate_json(ContactInviteSchema)
@@ -1059,19 +1020,6 @@ def trigger_sos():
         "timestamp": datetime.utcnow().isoformat(),
     }, room="sos_room")
 
-    # ===== TIER 3 PART 3: native push, works even with every tab closed =====
-    conn = get_db()
-    send_push_to_users(
-        conn,
-        get_push_recipients(conn, current_user.id),
-        title="🚨 SOS Alert",
-        body=message,
-        url="/",
-        tag="safeher-sos",
-        critical=True,
-    )
-    conn.close()
-
     return jsonify(
         {
             "status": "alert_sent",
@@ -1187,18 +1135,6 @@ def trigger_sos_internal(user_id, lat, lng, trigger_type):
         (user_id, trigger_type, lat, lng, message, "sos", datetime.utcnow().isoformat()),
     )
     conn.commit()
-
-    # ===== TIER 3 PART 3: native push (covers audio-ML auto-SOS and the
-    # check-in-timer-expired path, both of which call this helper) =====
-    send_push_to_users(
-        conn,
-        get_push_recipients(conn, user_id),
-        title="🚨 SOS Alert",
-        body=message,
-        url="/",
-        tag="safeher-sos",
-        critical=True,
-    )
     conn.close()
 
     logger.info(
@@ -1388,18 +1324,6 @@ def check_location_risk():
             "recommendation": prediction["factors"]["recommendation"],
         }, room=f"user_{current_user.id}")
 
-        # ===== TIER 3 PART 3: native push for high-risk-area detection =====
-        send_push_to_users(
-            conn,
-            get_push_recipients(conn, current_user.id),
-            title="⚠️ High-Risk Area Nearby",
-            body=f"Risk score {risk_score:.0f}/100"
-            + (f" near {nearest_threat['area_name']}" if nearest_threat else "")
-            + ". Consider a different route.",
-            url="/",
-            tag="safeher-risk",
-        )
-
     if risk_score > 60:
         socketio.emit("ml_risk_alert", {
             "risk_score": risk_score,
@@ -1562,18 +1486,6 @@ def check_location_risk_internal(lat, lng, user_id):
         )
         conn.commit()
 
-        # ===== TIER 3 PART 3: native push for high-risk-area detection =====
-        send_push_to_users(
-            conn,
-            get_push_recipients(conn, user_id),
-            title="⚠️ High-Risk Area Nearby",
-            body=f"Risk score {prediction['risk_score']:.0f}/100"
-            + (f" near {nearest_threat['area_name']}" if nearest_threat else "")
-            + ". Consider a different route.",
-            url="/",
-            tag="safeher-risk",
-        )
-
         if prediction["risk_score"] > 60:
             socketio.emit("ml_risk_alert", {
                 "risk_score": prediction["risk_score"],
@@ -1657,13 +1569,7 @@ def tracking_stop():
     return jsonify({"status": "tracking_stopped"})
 
 
-@app.route("/api/tracking/my-history", methods=["GET"])
-@login_required
-def tracking_my_history():
-    """Recent breadcrumb trail for the current user (used to redraw the
-    trail on page reload). Distinct from GET /api/tracking/history, which
-    is the authorization-checked endpoint for viewing a Bubble member's
-    guardian-share history."""
+
     conn = get_db()
     rows = conn.execute(
         "SELECT latitude, longitude, timestamp FROM location_history "
@@ -1756,15 +1662,6 @@ def sync_offline_actions():
                 "latitude": lat,
                 "longitude": lng,
             }, room="sos_room")
-            send_push_to_users(
-                conn,
-                get_push_recipients(conn, current_user.id),
-                title="🚨 SOS Alert (offline sync)",
-                body=payload.get("message", "SOS raised while offline"),
-                url="/",
-                tag="safeher-sos",
-                critical=True,
-            )
             applied = True
             logger.info(
                 "SOS triggered (offline sync): user=%s queue_id=%s",
@@ -1895,88 +1792,6 @@ def test_notification():
         "timestamp": datetime.utcnow().isoformat(),
     }, room=f"user_{current_user.id}")
     return jsonify({"status": "notification_sent"})
-
-
-# ---------------------------------------------------------------------------
-# TIER 3 PART 3: Real Web Push (Web Push API via pywebpush + VAPID)
-# ---------------------------------------------------------------------------
-@app.route("/api/push/vapid-public-key", methods=["GET"])
-@login_required
-def push_vapid_public_key():
-    key = get_vapid_public_key()
-    if not key:
-        return jsonify({"error": "push_not_configured", "message": "Server has no VAPID keys configured."}), 503
-    return jsonify({"public_key": key})
-
-
-@app.route("/api/push/subscribe", methods=["POST"])
-@login_required
-@validate_json(PushSubscribeSchema)
-def push_subscribe():
-    data = g.validated_data
-    endpoint = data["endpoint"]
-    keys = data["keys"]
-
-    conn = get_db()
-    # One endpoint can only ever belong to one browser subscription; if a
-    # different account previously subscribed the same endpoint (e.g. a
-    # shared/borrowed device), re-point it to the current user instead of
-    # erroring, since the old owner's subscription is no longer valid there.
-    conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id != ?", (endpoint, current_user.id))
-    conn.execute(
-        """INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth""",
-        (current_user.id, endpoint, keys["p256dh"], keys["auth"], datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify({"status": "subscribed", "configured": push_configured()}), 201
-
-
-@app.route("/api/push/unsubscribe", methods=["POST"])
-@login_required
-@validate_json(PushUnsubscribeSchema)
-def push_unsubscribe():
-    endpoint = g.validated_data["endpoint"]
-
-    conn = get_db()
-    conn.execute(
-        "DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?",
-        (endpoint, current_user.id),
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify({"status": "unsubscribed"})
-
-
-# ---------------------------------------------------------------------------
-# TIER 3 PART 3: Frontend error resilience — client-side error reporting.
-# Deliberately NOT @login_required: errors on the login/signup page itself
-# (before a session exists) are exactly the kind of thing we want visibility
-# into. Rate-limited to stop a broken client from looping into a log-flood.
-# ---------------------------------------------------------------------------
-@app.route("/api/client-error", methods=["POST"])
-@limiter.limit("30 per minute")
-@validate_json(ClientErrorSchema)
-def client_error():
-    data = g.validated_data
-    user_label = current_user.email if current_user.is_authenticated else "anonymous"
-    security_logger.warning(
-        "Client-side error [%s] user=%s url=%s message=%s source=%s:%s stack=%s ua=%s",
-        data.get("kind") or "error",
-        user_label,
-        data.get("url"),
-        data.get("message"),
-        data.get("source"),
-        data.get("line"),
-        (data.get("stack") or "")[:500],
-        data.get("ua"),
-    )
-    # 204 No Content: fire-and-forget, nothing for the beacon/fetch call to parse.
-    return "", 204
 
 
 if __name__ == "__main__":

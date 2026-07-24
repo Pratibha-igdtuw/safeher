@@ -5,13 +5,6 @@ python-engineio>=4.0.0
 Flask-Login>=0.6.0
 Werkzeug>=2.0.0
 
-<<<<<<< HEAD
-# --- Tier 3 Part 2: Infrastructure & Reliability ---------------------------
-# Loads SECRET_KEY / DATABASE_URL / DEBUG / CORS_ORIGINS / etc. from a local
-# .env file at startup (see config.py + .env.example).
-python-dotenv>=1.0.0
-=======
->>>>>>> 12f0b65 (Updated SafeHer features and UI)
 # --- Tier 3 Part 1: Security hardening --------------------------------------
 Flask-Limiter>=3.5.0        # /login, /signup, and (future) 2FA rate limiting
 flask-talisman>=1.1.0       # CSP / X-Frame-Options / X-Content-Type-Options
