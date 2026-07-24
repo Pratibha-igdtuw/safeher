@@ -471,7 +471,7 @@ def init_db():
 def index():
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
-    return redirect(url_for("login"))
+    return render_template("landing.html")
 
 
 def _login_rate_limit_key():

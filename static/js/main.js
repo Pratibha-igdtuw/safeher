@@ -1389,3 +1389,111 @@ window.addEventListener("online", () => {
 
 updateOfflineBanner();
 syncOfflineQueue(); // in case there were queued actions from a previous offline session
+// ---------------------------------------------------------------------------
+// PREMIUM UI LAYER — purely visual. Adds no new routes, changes no existing
+// behaviour, and never blocks if an element is missing (e.g. other tabs).
+// ---------------------------------------------------------------------------
+(function premiumUILayer() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // --- Navbar shrink on scroll ---------------------------------------------
+  const topbar = document.querySelector(".topbar");
+  if (topbar) {
+    const onScroll = () => topbar.classList.toggle("is-scrolled", window.scrollY > 24);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+  }
+
+  // --- Scroll-reveal for cards ---------------------------------------------
+  const revealEls = document.querySelectorAll(".reveal");
+  if (revealEls.length) {
+    if (reduceMotion || !("IntersectionObserver" in window)) {
+      revealEls.forEach((el) => el.classList.add("in-view"));
+    } else {
+      const io = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry, i) => {
+            if (entry.isIntersecting) {
+              setTimeout(() => entry.target.classList.add("in-view"), i * 60);
+              io.unobserve(entry.target);
+            }
+          });
+        },
+        { threshold: 0.15, rootMargin: "0px 0px -40px 0px" }
+      );
+      revealEls.forEach((el) => io.observe(el));
+    }
+  }
+
+  // Re-trigger reveal for cards inside a tab that becomes visible again
+  // (tab-panels start hidden via CSS `display:none`, so IO only fires once
+  // they're actually laid out — re-observe on tab click just in case).
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      requestAnimationFrame(() => {
+        document.querySelectorAll(".reveal:not(.in-view)").forEach((el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.top < window.innerHeight) el.classList.add("in-view");
+        });
+      });
+    });
+  });
+
+  // --- Hero particle field (floating dots + drifting connective lines,
+  //     evoking GPS pings / a live-tracking network) ------------------------
+  const canvas = document.getElementById("heroParticles");
+  if (canvas && !reduceMotion) {
+    const ctx = canvas.getContext("2d");
+    let w, h, particles;
+    const COLORS = ["rgba(139,92,246,0.8)", "rgba(34,211,238,0.75)", "rgba(236,72,153,0.7)"];
+
+    function resize() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      w = canvas.width = rect.width + 48;
+      h = canvas.height = rect.height + 80;
+      const count = Math.min(46, Math.floor((w * h) / 16000));
+      particles = Array.from({ length: count }, () => ({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: 1 + Math.random() * 2,
+        vx: (Math.random() - 0.5) * 0.25,
+        vy: (Math.random() - 0.5) * 0.25,
+        c: COLORS[Math.floor(Math.random() * COLORS.length)],
+      }));
+    }
+
+    function tick() {
+      ctx.clearRect(0, 0, w, h);
+      for (const p of particles) {
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0 || p.x > w) p.vx *= -1;
+        if (p.y < 0 || p.y > h) p.vy *= -1;
+      }
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const a = particles[i], b = particles[j];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d < 120) {
+            ctx.strokeStyle = `rgba(139,92,246,${0.14 * (1 - d / 120)})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+      }
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.fillStyle = p.c;
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      requestAnimationFrame(tick);
+    }
+
+    resize();
+    window.addEventListener("resize", resize, { passive: true });
+    tick();
+  }
+})();

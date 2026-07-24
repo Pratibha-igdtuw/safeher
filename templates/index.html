@@ -37,15 +37,7 @@
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     {% if is_admin %}
-<<<<<<< HEAD
     <a href="/admin" class="admin-nav-link">📊 Admin</a>
-=======
-<<button class="tab-btn" data-tab="community">Community</button>
-{% if is_admin %}
-<a href="/admin" class="admin-nav-link">📊 Admin</a>
-{% endif %}
-
->>>>>>> 5563081d87a0314af447d482db736edde085e10c
     {% endif %}
     <a href="/logout" class="admin-nav-link">Logout</a>
   </nav>
@@ -53,7 +45,8 @@
 
 <!-- ============================= HOME TAB HERO ============================= -->
 <section class="hero" id="tab-home-hero">
-  <div>
+  <canvas id="heroParticles" class="hero-particles" aria-hidden="true"></canvas>
+  <div class="hero-copy">
     <p class="hero-eyebrow">AI Guardian · Always On</p>
     <h1>Your safety net, wrapped around every step.</h1>
     <p>One tap for SOS, a private circle that can see where you are, and quiet tools —
@@ -78,14 +71,14 @@
 <!-- ============================= HOME TAB ============================= -->
 <main id="tab-home" class="grid tab-panel">
 
-  <section class="card sos-card">
+  <section class="card sos-card reveal">
     <h2>Emergency SOS</h2>
     <p class="muted">One tap sends your live location + alert to all trusted contacts.</p>
     <button id="sosBtn" class="sos-button">SOS</button>
     <p id="sosStatus" class="status-line"></p>
   </section>
 
-  <section class="card">
+  <section class="card reveal">
     <h2>Fake Call</h2>
     <p class="muted">Trigger a realistic incoming call to exit an uncomfortable situation.</p>
     <div class="row">
@@ -100,7 +93,7 @@
     <p id="fakeCallStatus" class="status-line"></p>
   </section>
 
-  <section class="card">
+  <section class="card reveal">
     <h2>Voice Distress Detection</h2>
     <p class="muted">Speak, or type what would be transcribed. The AI model scans for distress patterns.</p>
     <div class="row">
@@ -125,7 +118,7 @@
     <p id="audioMlResult" class="status-line"></p>
   </section>
 
-  <section class="card">
+  <section class="card reveal">
     <h2>Safe Check-in Timer</h2>
     <p class="muted">Set a timer. If you don't check in before it ends, contacts get alerted automatically.</p>
     <div class="row">
@@ -137,7 +130,7 @@
     <button id="confirmSafeBtn" class="btn safe-btn" disabled>I'm Safe ✔</button>
   </section>
 
-  <section class="card">
+  <section class="card reveal">
     <h2>Anonymous Record</h2>
     <p class="muted">Silently capture audio evidence — no alert is sent to anyone, nothing leaves your device.</p>
     <div class="row">
@@ -149,12 +142,12 @@
     <a id="downloadRecordingLink" class="hidden" download="safeher-recording.webm">Download recording</a>
   </section>
 
-  <section class="card">
+  <section class="card reveal">
     <h2>Recent Alerts</h2>
     <ul id="alertsList" class="alerts-list"></ul>
   </section>
 
-  <section class="card" id="twoFaCard">
+  <section class="card reveal" id="twoFaCard">
     <h2>Account Security — 2FA</h2>
     <p class="muted">Add an authenticator app (Google/Microsoft Authenticator) as a second login step.</p>
     <p id="twoFaStatus" class="status-line"></p>
@@ -238,7 +231,7 @@
 
 <!-- ============================= DIRECTORY TAB ============================= -->
 <main id="tab-directory" class="tab-panel hidden">
-  <section class="card">
+  <section class="card reveal">
     <h2>Nearby Safety Services</h2>
     <p class="muted">Police stations, hospitals, pharmacies, and helplines closest to you.</p>
     <div class="row">
@@ -318,7 +311,7 @@
 
 <!-- ============================= COMMUNITY TAB ============================= -->
 <main id="tab-community" class="tab-panel hidden">
-  <section class="card">
+  <section class="card reveal">
     <h2>Community Safety Feed</h2>
     <p class="muted">Share and see real-time safety alerts and safe-spot tips from people nearby — like I'M SAFE's Community Feed.</p>
 

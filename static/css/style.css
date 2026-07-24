@@ -17,10 +17,13 @@
   --violet: #8b5cf6;
   --violet-2: #6d28d9;
   --cyan: #22d3ee;
+  --pink: #ec4899;
   --coral: #ff4d6d;
   --coral-dim: #7a1f30;
   --safe: #34d399;
   --warn: #fbbf24;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   --r-lg: 20px;
   --r-md: 14px;
@@ -75,7 +78,18 @@ select:focus-visible, a:focus-visible {
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border-bottom: 1px solid var(--border);
+  transition: padding 0.35s var(--ease-out), background 0.35s var(--ease-out), box-shadow 0.35s var(--ease-out);
 }
+
+.topbar.is-scrolled {
+  padding-top: 12px;
+  background: rgba(10, 7, 22, 0.88);
+  box-shadow: 0 12px 30px -18px rgba(0,0,0,0.7);
+}
+
+.topbar.is-scrolled .brand { font-size: 22px; }
+.topbar.is-scrolled .tagline { margin-bottom: 10px; opacity: 0; height: 0; margin-top: -6px; overflow: hidden; }
+.topbar .brand, .topbar .tagline { transition: font-size 0.35s var(--ease-out), opacity 0.25s ease, margin 0.35s var(--ease-out); }
 
 .brand {
   display: flex;
@@ -152,6 +166,7 @@ select:focus-visible, a:focus-visible {
 
 /* ---------------- Hero (Home tab signature element) ---------------- */
 .hero {
+  position: relative;
   max-width: 1100px;
   margin: 0 auto;
   padding: 48px 24px 8px;
@@ -159,6 +174,34 @@ select:focus-visible, a:focus-visible {
   grid-template-columns: 1.1fr 0.9fr;
   gap: 32px;
   align-items: center;
+  isolation: isolate;
+}
+
+.hero-particles {
+  position: absolute;
+  inset: -40px -24px;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+.hero-copy { animation: hero-rise 0.9s var(--ease-out) both; }
+
+@keyframes hero-rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Scroll-reveal for cards: JS toggles .in-view once the element enters the viewport */
+.reveal {
+  opacity: 0;
+  transform: translateY(28px);
+  transition: opacity 0.7s var(--ease-out), transform 0.7s var(--ease-out);
+}
+.reveal.in-view { opacity: 1; transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .hero-copy { animation: none; }
 }
 
 .hero-eyebrow {
@@ -305,7 +348,7 @@ select:focus-visible, a:focus-visible {
   inset: 0;
   border-radius: inherit;
   padding: 1px;
-  background: linear-gradient(140deg, rgba(139,92,246,0.5), transparent 30%, transparent 70%, rgba(34,211,238,0.35));
+  background: linear-gradient(140deg, rgba(139,92,246,0.5), rgba(236,72,153,0.25) 45%, transparent 65%, rgba(34,211,238,0.35));
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
