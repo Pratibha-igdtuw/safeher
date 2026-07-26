@@ -575,7 +575,6 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at
             ON admin_audit_log(created_at DESC);
-
         -- Safety Map: quick category reports from long-pressing the map
         -- (poor lighting, harassment, etc). user_id is kept for abuse
         -- moderation only — it is never returned by the GET endpoint, so
