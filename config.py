@@ -87,6 +87,14 @@ class Config:
     DB_BUSY_TIMEOUT_MS = int(os.environ.get("DB_BUSY_TIMEOUT_MS", 5000))
     DB_CONNECT_TIMEOUT_S = int(os.environ.get("DB_CONNECT_TIMEOUT_S", 10))
 
+    # Seed admin account (see seed_default_admin() in app.py): if no user in
+    # the DB has is_admin=1 yet, one is created/promoted with these
+    # credentials on startup. Change DEFAULT_ADMIN_PASSWORD via env var for
+    # anything beyond local/demo use, and change the account's real password
+    # after first login regardless.
+    DEFAULT_ADMIN_EMAIL = os.environ.get("DEFAULT_ADMIN_EMAIL", "admin@123.com")
+    DEFAULT_ADMIN_PASSWORD = os.environ.get("DEFAULT_ADMIN_PASSWORD", "123456")
+
 
 class DevConfig(Config):
     ENV_NAME = "development"

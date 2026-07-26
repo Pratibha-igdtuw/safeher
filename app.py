@@ -23,6 +23,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
+from functools import wraps
 import sqlite3
 import os
 import math
@@ -557,6 +558,22 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+
+        -- Admin activity trail: who viewed/exported what, and when
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_user_id INTEGER NOT NULL,
+            admin_email TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT,
+            details TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(admin_user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at
+            ON admin_audit_log(created_at DESC);
         """
     )
     conn.commit()
@@ -582,6 +599,47 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def seed_default_admin():
+    """Guarantee at least one admin account exists, so the admin dashboard
+    and audit log are reachable without hand-editing the database.
+
+    - If any user already has is_admin=1, does nothing.
+    - Else if a user with DEFAULT_ADMIN_EMAIL already exists (e.g. you
+      signed up normally with that address), promotes that account.
+    - Else creates a new account with DEFAULT_ADMIN_EMAIL /
+      DEFAULT_ADMIN_PASSWORD (both overridable via env vars — see
+      config.py). Change the password after first login.
+    """
+    conn = get_db()
+    existing_admin = conn.execute("SELECT id FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+    if existing_admin:
+        conn.close()
+        return
+
+    default_email = app.config["DEFAULT_ADMIN_EMAIL"]
+    default_password = app.config["DEFAULT_ADMIN_PASSWORD"]
+
+    existing_user = conn.execute("SELECT id FROM users WHERE email = ?", (default_email,)).fetchone()
+    if existing_user:
+        conn.execute("UPDATE users SET is_admin = 1 WHERE email = ?", (default_email,))
+        conn.commit()
+        conn.close()
+        logger.warning("No admin existed yet — promoted existing user %s to admin.", default_email)
+        return
+
+    conn.execute(
+        "INSERT INTO users (email, password_hash, is_admin, created_at) VALUES (?, ?, 1, ?)",
+        (default_email, generate_password_hash(default_password), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    logger.warning(
+        "No admin existed yet — created default admin account %s. "
+        "Log in and change its password immediately.",
+        default_email,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -840,16 +898,56 @@ def offline_fallback():
 # ---------------------------------------------------------------------------
 # Admin Dashboard
 # ---------------------------------------------------------------------------
+def admin_required(f):
+    """Gate a route to logged-in admins only. Keeps the existing single
+    is_admin flag (no separate viewer/superadmin tiers) but centralizes
+    the check so every admin route enforces it the same way."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return jsonify({"error": "unauthorized"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def log_admin_action(action, target=None, details=None):
+    """Record an admin action (dashboard view, analytics/export view, or
+    any user-management action) into admin_audit_log for accountability.
+
+    action:  short machine-readable label, e.g. "view_dashboard"
+    target:  optional identifier for what was acted on, e.g. a user email
+    details: optional free-text/JSON string with extra context
+    """
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO admin_audit_log "
+        "(admin_user_id, admin_email, action, target, details, ip_address, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            current_user.id,
+            current_user.email,
+            action,
+            target,
+            details,
+            request.remote_addr,
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 @app.route("/admin")
 @login_required
+@admin_required
 def admin_dashboard():
-    if not current_user.is_admin:
-        return jsonify({"error": "unauthorized"}), 403
+    log_admin_action("view_dashboard")
     return render_template("admin.html")
 
 
 @app.route("/api/admin/analytics")
 @login_required
+@admin_required
 def admin_analytics():
     """
     Return analytics data for admin dashboard:
@@ -858,8 +956,7 @@ def admin_analytics():
     - alerts timeline
     - most unsafe zones
     """
-    if not current_user.is_admin:
-        return jsonify({"error": "unauthorized"}), 403
+    log_admin_action("view_analytics", details="viewed audits/alerts analytics + heatmap export")
 
     conn = get_db()
 
@@ -902,6 +999,50 @@ def admin_analytics():
         "audits_for_map": audits_list,
         "alerts_timeline": alerts_timeline,
         "risk_alerts_triggered": risk_alerts_count,
+    })
+
+
+@app.route("/api/admin/audit-log")
+@login_required
+@admin_required
+def admin_audit_log_list():
+    """Paginated listing of the admin_audit_log table, newest first.
+
+    Query params:
+        page:     1-indexed page number (default 1)
+        per_page: rows per page (default 20, capped at 100)
+    """
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", 20))
+    except (TypeError, ValueError):
+        per_page = 20
+    per_page = min(max(per_page, 1), 100)
+    offset = (page - 1) * per_page
+
+    conn = get_db()
+
+    total = dict(conn.execute("SELECT COUNT(*) as count FROM admin_audit_log").fetchone())["count"]
+
+    rows = conn.execute(
+        "SELECT id, admin_email, action, target, details, ip_address, created_at "
+        "FROM admin_audit_log ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        (per_page, offset),
+    ).fetchall()
+    conn.close()
+
+    entries = [dict(r) for r in rows]
+    total_pages = max(1, math.ceil(total / per_page))
+
+    return jsonify({
+        "entries": entries,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "total_pages": total_pages,
     })
 
 
@@ -2906,6 +3047,7 @@ def test_notification():
 if __name__ == "__main__":
     os.makedirs(os.path.dirname(app.config["DATABASE_PATH"]) or ".", exist_ok=True)
     init_db()
+    seed_default_admin()
     logger.info(
         "Starting SafeHer (env=%s, debug=%s, host=%s, port=%s)",
         app.config.get("ENV_NAME", "unknown"), app.config["DEBUG"], app.config["HOST"], app.config["PORT"],

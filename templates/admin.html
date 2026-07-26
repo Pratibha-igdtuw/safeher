@@ -251,6 +251,70 @@
       font-size: 13px;
       color: #92400e;
     }
+
+    .audit-table-wrap { overflow-x: auto; }
+
+    .audit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      min-width: 640px;
+    }
+
+    .audit-table th {
+      text-align: left;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border-strong);
+      white-space: nowrap;
+    }
+
+    .audit-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .audit-table tr:last-child td { border-bottom: none; }
+
+    .audit-action-badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: rgba(124,58,237,0.12);
+      color: var(--violet-2);
+      font-weight: 600;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .audit-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .audit-page-btn {
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      background: #ffffff;
+      color: var(--violet-2);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .audit-page-btn:hover:not(:disabled) { background: rgba(139,92,246,0.18); }
+    .audit-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -321,6 +385,35 @@
       </div>
     </div>
 
+  </div>
+
+  <!-- Admin Audit Log -->
+  <div class="section">
+    <h2>🗂️ Admin Audit Log</h2>
+    <div class="alert-note">
+      Records every admin dashboard view, analytics/export view, and user-management action — who did it, when, and from where.
+    </div>
+    <div class="audit-table-wrap">
+      <table class="audit-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Admin</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>IP Address</th>
+          </tr>
+        </thead>
+        <tbody id="auditLogBody">
+          <tr><td colspan="5"><div class="loading"><div class="spinner"></div>Loading...</div></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="audit-pagination">
+      <span id="auditPageInfo">Page 1</span>
+      <button class="audit-page-btn" id="auditPrevBtn" onclick="changeAuditPage(-1)">← Prev</button>
+      <button class="audit-page-btn" id="auditNextBtn" onclick="changeAuditPage(1)">Next →</button>
+    </div>
   </div>
 
 </div>
@@ -443,8 +536,72 @@
     }
   }
 
+  // --- Admin Audit Log ---
+  let auditCurrentPage = 1;
+  let auditTotalPages = 1;
+
+  async function loadAuditLog(page = 1) {
+    try {
+      const res = await fetch(`/api/admin/audit-log?page=${page}&per_page=20`, {
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        if (res.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+        throw new Error("Failed to load audit log");
+      }
+
+      const data = await res.json();
+      auditCurrentPage = data.page;
+      auditTotalPages = data.total_pages;
+      renderAuditLog(data.entries);
+
+      document.getElementById("auditPageInfo").textContent =
+        `Page ${data.page} of ${data.total_pages} (${data.total} total)`;
+      document.getElementById("auditPrevBtn").disabled = data.page <= 1;
+      document.getElementById("auditNextBtn").disabled = data.page >= data.total_pages;
+    } catch (err) {
+      console.error("Error loading audit log:", err);
+      document.getElementById("auditLogBody").innerHTML =
+        '<tr><td colspan="5" style="text-align:center; color:#888;">Failed to load audit log</td></tr>';
+    }
+  }
+
+  function renderAuditLog(entries) {
+    const body = document.getElementById("auditLogBody");
+    if (!entries || entries.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#888;">No admin activity recorded yet</td></tr>';
+      return;
+    }
+
+    body.innerHTML = entries
+      .map((e) => {
+        const when = new Date(e.created_at).toLocaleString();
+        return `<tr>
+          <td>${when}</td>
+          <td>${e.admin_email}</td>
+          <td><span class="audit-action-badge">${e.action}</span></td>
+          <td>${e.target || e.details || "—"}</td>
+          <td>${e.ip_address || "—"}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  function changeAuditPage(delta) {
+    const next = auditCurrentPage + delta;
+    if (next < 1 || next > auditTotalPages) return;
+    loadAuditLog(next);
+  }
+
   // Load on page load
-  window.addEventListener("load", loadAnalytics);
+  window.addEventListener("load", () => {
+    loadAnalytics();
+    loadAuditLog(1);
+  });
 
   // Refresh every 30 seconds
   setInterval(loadAnalytics, 30000);
