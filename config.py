@@ -75,8 +75,6 @@ class Config:
     )
     DATABASE_PATH = database_path_from_url(DATABASE_URL)
 
-    CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*")
-
     LOG_DIR = os.environ.get("LOG_DIR", os.path.join(BASE_DIR, "logs"))
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
     LOG_MAX_BYTES = int(os.environ.get("LOG_MAX_BYTES", 1_000_000))

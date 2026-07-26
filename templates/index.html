@@ -41,6 +41,7 @@
     <button class="tab-btn" data-tab="directory">Directory</button>
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
+    <button class="tab-btn" data-tab="assistant">🤖 Assistant</button>
     {% if is_admin %}
     <a href="/admin" class="admin-nav-link">📊 Admin</a>
     {% endif %}
@@ -71,8 +72,78 @@
   </div>
 </section>
 
+<!-- ============================= STATUS STRIP ============================= -->
+<section class="status-strip" id="statusStrip">
+  <div class="status-chip" id="safetyScoreChip">
+    <span class="status-chip-label">Safety Score</span>
+    <span class="status-chip-value" id="safetyScoreValue">—</span>
+  </div>
+  <div class="status-chip" id="journeyStatusChip">
+    <span class="status-chip-label">Journey</span>
+    <span class="status-chip-value" id="journeyStatusValue">No active journey</span>
+  </div>
+  <div class="status-chip" id="guardianStatusChip">
+    <span class="status-chip-label">Guardian</span>
+    <span class="status-chip-value" id="guardianStatusValue">Not sharing</span>
+  </div>
+</section>
+
 <!-- ============================= HOME TAB ============================= -->
 <main id="tab-home" class="grid tab-panel">
+
+  <!-- ===================== JOURNEY MODE (primary feature) ===================== -->
+  <section class="card journey-card" id="journeyCard">
+    <span class="card-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.447-2.724A1 1 0 0 1 3 16.382V5.618a1 1 0 0 1 1.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0 0 21 18.382V7.618a1 1 0 0 0-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+    </span>
+    <h2>Journey Mode</h2>
+    <p class="muted">Start an escorted journey. If you don't check in before your ETA, we alert your guardian automatically.</p>
+
+    <!-- Idle state: start a new journey -->
+    <div id="journeyIdleView">
+      <div class="row">
+        <input id="journeyDestination" type="text" placeholder="Destination (e.g. Home, Office)" />
+      </div>
+      <div class="row">
+        <input id="journeyEtaMinutes" type="number" min="1" value="20" />
+        <span class="muted">minutes ETA</span>
+      </div>
+      <div class="row">
+        <select id="journeyGuardianSelect">
+          <option value="">No guardian (alert all trusted contacts)</option>
+        </select>
+      </div>
+      <button id="startJourneyBtn" class="btn safe-btn">🧭 Start Journey</button>
+      <p id="journeyStartStatus" class="status-line"></p>
+    </div>
+
+    <!-- Active state: live journey in progress -->
+    <div id="journeyActiveView" class="hidden">
+      <div class="journey-active-header">
+        <div>
+          <p class="journey-destination" id="journeyActiveDestination">—</p>
+          <p class="journey-badge" id="journeyActiveBadge">On track</p>
+        </div>
+        <p class="journey-countdown" id="journeyCountdown">--:--</p>
+      </div>
+
+      <div class="progress-track">
+        <div class="progress-fill" id="journeyProgressFill" style="width:0%"></div>
+      </div>
+      <p class="muted" id="journeyDistanceRemaining"></p>
+
+      <div class="row">
+        <button id="journeyArrivedBtn" class="btn safe-btn">✅ I've Arrived</button>
+        <button id="journeyExtendBtn" class="btn">+10 min</button>
+        <button id="journeyCancelBtn" class="btn secondary">Cancel</button>
+      </div>
+
+      <button id="journeyTimelineToggle" class="btn secondary" style="margin-top:10px; width:100%;">Show Journey Timeline</button>
+      <ul id="journeyTimelineList" class="alerts-list hidden" style="margin-top:10px;"></ul>
+    </div>
+
+    <p class="card-tags"><span>Auto Alert</span><span>Live Status</span><span>Guardian Linked</span></p>
+  </section>
 
   <section class="card sos-card">
     <span class="card-icon" aria-hidden="true">
@@ -80,10 +151,39 @@
     </span>
     <h2>Emergency SOS</h2>
     <p class="muted">One tap sends your live location + alert to all trusted contacts.</p>
-    <button id="sosBtn" class="sos-button">SOS</button>
+
+    <button id="sosBtn" class="sos-button">
+      <span id="sosBtnLabel">SOS</span>
+    </button>
+    <button id="sosCancelBtn" class="btn secondary hidden" style="margin-top:14px;">Cancel</button>
+
+    <ul id="sosStepTimeline" class="sos-step-timeline hidden">
+      <li data-step="countdown"><span class="sos-step-dot"></span> Countdown started</li>
+      <li data-step="location"><span class="sos-step-dot"></span> Acquiring your location</li>
+      <li data-step="sending"><span class="sos-step-dot"></span> Sending alert</li>
+      <li data-step="notified"><span class="sos-step-dot"></span> Contacts notified</li>
+    </ul>
+
     <p id="sosStatus" class="status-line"></p>
-    <p class="card-tags"><span>Always on</span><span>&lt; 2s dispatch</span></p>
+    <p class="card-tags"><span>Always on</span><span>3s cancel window</span><span>Auto-retry</span></p>
   </section>
+
+  <section class="card assistant-shortcut-card">
+    <span class="card-icon" aria-hidden="true">🤖</span>
+    <h2>Ask the SafeHer Assistant</h2>
+    <p class="muted">Safety tips, emergency guidance, nearby help, safer routes, or general legal questions — grounded in your real SafeHer data.</p>
+    <button class="btn safe-btn" onclick="document.querySelector('[data-tab=&quot;assistant&quot;]').click()">Open Assistant</button>
+  </section>
+
+  <section class="card">
+    <span class="card-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+    </span>
+    <h2>Emergency History</h2>
+    <p class="muted">Every SOS and auto-alert on your account, most recent first.</p>
+    <ul id="alertsList" class="alerts-list emergency-history-list"></ul>
+  </section>
+
 
   <section class="card">
     <span class="card-icon" aria-hidden="true">
@@ -91,15 +191,37 @@
     </span>
     <h2>Fake Call</h2>
     <p class="muted">Trigger a realistic incoming call to exit an uncomfortable situation.</p>
+
+    <div class="row">
+      <select id="fakeCallerName">
+        <option value="Mom">Mom</option>
+        <option value="Dad">Dad</option>
+        <option value="Boss">Boss</option>
+        <option value="Best Friend">Best Friend</option>
+        <option value="Unknown Number">Unknown Number</option>
+        <option value="__custom__">Custom name…</option>
+      </select>
+      <input id="fakeCallerNameCustom" type="text" placeholder="Enter a name" class="hidden" maxlength="40" />
+    </div>
+
     <div class="row">
       <select id="fakeCallDelay">
         <option value="0">Now</option>
         <option value="5">In 5 sec</option>
         <option value="15">In 15 sec</option>
         <option value="30">In 30 sec</option>
+        <option value="60">In 1 min</option>
+        <option value="300">In 5 min</option>
+        <option value="__custom__">Custom delay…</option>
       </select>
-      <button id="fakeCallBtn" class="btn">Schedule Fake Call</button>
+      <input id="fakeCallDelayCustom" type="number" min="1" max="3600" placeholder="Seconds" class="hidden" style="max-width:100px;" />
     </div>
+
+    <label class="checkbox-row" style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:12px;">
+      <input type="checkbox" id="fakeCallSilent" /> Silent mode (vibrate only, no ringtone sound)
+    </label>
+
+    <button id="fakeCallBtn" class="btn" style="margin-top:10px;">Schedule Fake Call</button>
     <p id="fakeCallStatus" class="status-line"></p>
     <p class="card-tags"><span>Instant</span><span>Private</span><span>Effective</span></p>
   </section>
@@ -114,8 +236,20 @@
       <button id="listenBtn" class="btn">🎙️ Start Listening</button>
       <button id="stopListenBtn" class="btn secondary" disabled>Stop</button>
     </div>
+    <canvas id="voiceWaveform" class="voice-waveform hidden" height="48"></canvas>
     <textarea id="transcriptBox" placeholder="Live transcript appears here... (or type to simulate)"></textarea>
     <button id="analyzeBtn" class="btn">Analyze Transcript</button>
+
+    <div id="distressResultPanel" class="distress-result-panel hidden">
+      <p id="distressVerdict" class="status-line"></p>
+      <div class="row" style="align-items:center; gap:8px;">
+        <span class="muted" style="font-size:11px; white-space:nowrap;">Confidence</span>
+        <div class="progress-track" style="flex:1;"><div id="distressConfidenceFill" class="progress-fill" style="width:0%;"></div></div>
+        <span id="distressConfidenceLabel" style="font-size:11px; font-weight:700;"></span>
+      </div>
+      <p id="distressEmotionBadge" class="journey-badge" style="margin-top:8px;"></p>
+      <p id="distressTranscriptHighlight" class="muted" style="font-size:12px; margin-top:6px;"></p>
+    </div>
     <p id="distressResult" class="status-line"></p>
 
     <hr class="divider" />
@@ -129,7 +263,12 @@
       <button id="audioMlBtn" class="btn">🔊 Start Audio ML Monitoring</button>
       <button id="stopAudioMlBtn" class="btn secondary" disabled>Stop</button>
     </div>
+    <canvas id="audioMlWaveform" class="voice-waveform hidden" height="48"></canvas>
     <p id="audioMlResult" class="status-line"></p>
+
+    <button id="voiceHistoryToggle" class="btn secondary" style="margin-top:12px; width:100%;">Show Transcript History</button>
+    <ul id="voiceHistoryList" class="alerts-list hidden" style="margin-top:10px;"></ul>
+
     <p class="card-tags"><span>Real-time AI</span><span>On-device ML</span><span>Private</span></p>
   </section>
 
@@ -154,26 +293,21 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
     </span>
     <h2>Anonymous Record</h2>
-    <p class="muted">Silently capture audio evidence — no alert is sent to anyone, nothing leaves your device.</p>
+    <p class="muted">Silently capture audio evidence — no alert is sent to anyone, nothing leaves your device. Encrypted at rest in your browser.</p>
     <div class="row">
       <button id="recordBtn" class="btn">⏺ Start Recording</button>
       <button id="stopRecordBtn" class="btn secondary" disabled>■ Stop</button>
+      <span id="recordTimer" class="record-timer hidden">00:00</span>
     </div>
+    <canvas id="recordWaveform" class="voice-waveform hidden" height="48"></canvas>
     <p id="recordStatus" class="status-line"></p>
     <audio id="recordPlayback" controls class="hidden" style="width:100%; margin-top:8px;"></audio>
     <a id="downloadRecordingLink" class="hidden" download="safeher-recording.webm">Download recording</a>
-    <p class="card-tags"><span>100% Private</span><span>Secure</span><span>Encrypted</span></p>
-  </section>
 
-  <section class="card">
-    <span class="card-icon" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-    </span>
-    <h2>Recent Alerts</h2>
-    <ul id="alertsList" class="alerts-list">
-      <li class="skeleton-item"></li>
-      <li class="skeleton-item"></li>
-    </ul>
+    <button id="recordHistoryToggle" class="btn secondary" style="margin-top:12px; width:100%;">Show Recording History</button>
+    <ul id="recordHistoryList" class="alerts-list hidden" style="margin-top:10px;"></ul>
+
+    <p class="card-tags"><span>100% Private</span><span>Secure</span><span>Encrypted</span></p>
   </section>
 
   <section class="card" id="twoFaCard">
@@ -215,7 +349,7 @@
 
     <div class="map-side card">
       <h2>Safety Score Map</h2>
-      <p class="muted">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits.</p>
+      <p class="muted" id="mapModeHint">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits.</p>
 
       <div class="legend">
         <span><i class="dot green"></i> Safe (75+)</span>
@@ -223,12 +357,25 @@
         <span><i class="dot red"></i> High Risk (&lt;45)</span>
       </div>
 
-      <div class="row" style="margin-top:14px">
-        <input id="originInput" type="text" placeholder="From" />
-        <input id="destInput" type="text" placeholder="To" />
+      <div class="row" style="margin-top:14px; flex-wrap:wrap;">
+        <button id="mapModeAuditBtn" class="btn map-mode-btn active">📍 Audit Mode</button>
+        <button id="mapModeRouteBtn" class="btn map-mode-btn secondary">🧭 Route Mode</button>
       </div>
-      <button id="routeCheckBtn" class="btn">Check Route Score</button>
-      <div id="routeResult" class="route-result"></div>
+
+      <div class="row" style="margin-top:8px; flex-wrap:wrap;">
+        <button id="layerRiskZonesBtn" class="btn map-layer-btn secondary">⬤ Risk Zones</button>
+        <button id="layerServicesBtn" class="btn map-layer-btn secondary">🏥 Nearby Help</button>
+      </div>
+
+      <p id="crowdDensityBadge" class="status-line hidden"></p>
+
+      <!-- Route Mode panel -->
+      <div id="routeModePanel" class="hidden" style="margin-top:14px;">
+        <p class="muted" style="font-size:12px;">Click the map to set <strong>A</strong> (origin), then click again to set <strong>B</strong> (destination). We'll compare route safety automatically.</p>
+        <button id="resetRouteBtn" class="btn secondary" style="width:100%; margin-top:6px;">Reset Route</button>
+        <div id="routeResult" class="route-result"></div>
+        <div id="routeComparePanel"></div>
+      </div>
     </div>
 
     <div class="map-wrap">
@@ -344,8 +491,35 @@
       <h3 style="margin-top:14px; font-size:14px;">Track a Bubble member</h3>
       <div class="row">
         <select id="trackableSelect"></select>
-        <button id="startTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
-        <button id="stopTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+        <button id="viewTrackingBtn" class="btn safe-btn" disabled>View Live Location</button>
+        <button id="stopViewTrackingBtn" class="btn secondary hidden">Stop Viewing</button>
+      </div>
+
+      <!-- ===================== Guardian Dashboard ===================== -->
+      <div id="guardianDashboard" class="guardian-dashboard hidden">
+        <h2 style="margin-top:20px; font-size:15px;">Guardian Dashboard</h2>
+        <div id="emergencyNotificationBanner" class="emergency-banner hidden"></div>
+        <div class="guardian-stat-grid">
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Connection</span>
+            <span class="guardian-stat-value" id="gdConnectionStatus">—</span>
+          </div>
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Battery</span>
+            <span class="guardian-stat-value" id="gdBatteryLevel">—</span>
+          </div>
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Last Updated</span>
+            <span class="guardian-stat-value" id="gdLastUpdated">—</span>
+          </div>
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Journey</span>
+            <span class="guardian-stat-value" id="gdJourneyStatus">No active journey</span>
+          </div>
+        </div>
+        <div class="progress-track" id="gdJourneyProgressTrack" style="display:none;">
+          <div class="progress-fill" id="gdJourneyProgressFill" style="width:0%"></div>
+        </div>
       </div>
     </div>
 
@@ -357,6 +531,11 @@
 
 <!-- ============================= COMMUNITY TAB ============================= -->
 <main id="tab-community" class="tab-panel hidden">
+  <section class="card" id="trendingStripCard">
+    <h2 style="font-size:15px;">🔥 Trending Alerts</h2>
+    <ul id="trendingList" class="alerts-list"></ul>
+  </section>
+
   <section class="card">
     <h2>Community Safety Feed</h2>
     <p class="muted">Share and see real-time safety alerts and safe-spot tips from people nearby — like I'M SAFE's Community Feed.</p>
@@ -372,10 +551,44 @@
     <textarea id="feedMessage" placeholder="What's happening? e.g. 'Streetlight out near the metro exit'"></textarea>
     <button id="postFeedBtn" class="btn safe-btn">Post to Feed</button>
 
-    <ul id="feedList" class="alerts-list" style="margin-top:16px; max-height:420px;">
-      <li class="skeleton-item"></li>
-      <li class="skeleton-item"></li>
-    </ul>
+    <hr class="divider" />
+
+    <div class="row" style="flex-wrap:wrap;">
+      <input id="feedSearchInput" type="text" placeholder="🔍 Search posts or areas…" style="flex:2;" />
+      <select id="feedFilterType" style="flex:1;">
+        <option value="">All categories</option>
+        <option value="alert">⚠️ Alerts</option>
+        <option value="safe_spot">✅ Safe Spots</option>
+        <option value="incident">🚨 Incidents</option>
+      </select>
+      <button id="feedSortToggle" class="btn secondary">Sort: Recent</button>
+    </div>
+
+    <ul id="feedList" class="alerts-list" style="margin-top:16px; max-height:420px;"></ul>
+  </section>
+</main>
+
+<!-- ============================= AI ASSISTANT TAB ============================= -->
+<main id="tab-assistant" class="tab-panel hidden">
+  <section class="card">
+    <h2>🤖 SafeHer Assistant</h2>
+    <p class="muted">Ask about safety tips, what to do in an emergency, nearby help, safer routes, or general legal questions.</p>
+
+    <div id="assistantChatWindow" class="assistant-chat-window">
+      <div class="assistant-message assistant-bot">
+        <p>Hi, I'm the SafeHer Assistant. I can help with safety tips, emergency guidance, finding nearby help, planning a safer route, or general legal questions. What's going on?</p>
+      </div>
+    </div>
+
+    <div id="assistantSuggestions" class="assistant-suggestions"></div>
+
+    <div class="row" style="margin-top:10px;">
+      <input id="assistantInput" type="text" placeholder="Ask me anything about staying safe…" maxlength="1000" />
+      <button id="assistantSendBtn" class="btn safe-btn">Send</button>
+    </div>
+    <p class="muted" style="font-size:11px; margin-top:8px;">
+      This is a rule-based safety assistant grounded in SafeHer's real data — not a general-purpose AI, and not a substitute for emergency services or a lawyer.
+    </p>
   </section>
 </main>
 
@@ -383,6 +596,7 @@
 <div id="fakeCallOverlay" class="fake-call-overlay hidden">
   <div class="fake-call-screen">
     <p class="caller-label">Incoming call</p>
+    <div id="callerAvatar" class="caller-avatar">M</div>
     <h1 id="callerName">Mom</h1>
     <p class="ringing">ringing...</p>
     <div class="call-actions">
@@ -402,6 +616,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
 <!-- FEATURE 4: WebSocket for real-time notifications -->
+<script>window.CURRENT_USER_ID = {{ current_user.id }};</script>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tilt.js') }}"></script>

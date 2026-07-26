@@ -1,6 +1,23 @@
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+// SECURITY FIX: several places below build innerHTML from user-controlled
+// (or externally-sourced) strings — contact names, feed posts, guardian
+// invite emails, SOS trigger types, journey destinations — without
+// escaping. That's stored XSS: e.g. adding a contact named
+// `<img src=x onerror=alert(document.cookie)>` would execute for anyone
+// who views the contact list. Every interpolation of such a string into
+// innerHTML below is now wrapped in escapeHtml().
+function escapeHtml(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function api(path, options = {}) {
   let res;
   try {
@@ -106,6 +123,16 @@ socket.on("connect", () => {
 
 socket.on("sos_triggered", (data) => {
   showNotification("🚨 SOS ALERT", data.message, "critical");
+  if (currentlyTrackingUserId) {
+    showEmergencyBanner(`🚨 SOS triggered by the person you're watching: ${data.message}`);
+  }
+});
+
+socket.on("journey_missed", (data) => {
+  if (currentlyTrackingUserId) {
+    showEmergencyBanner(`🧭 Missed check-in for '${data.destination_name}' — this person may need help.`);
+    refreshGuardianDashboard();
+  }
 });
 
 socket.on("risk_alert", (data) => {
@@ -152,7 +179,7 @@ function showNotification(title, message, type) {
   notif.className = `notification notification-${type}`;
   notif.setAttribute("role", "alert");
   notif.setAttribute("aria-live", type === "critical" ? "assertive" : "polite");
-  notif.innerHTML = `<strong>${title}</strong><br/>${message}`;
+  notif.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>${escapeHtml(message)}`;
   document.body.appendChild(notif);
   
   // Animate in
@@ -216,6 +243,7 @@ const tabPanels = {
   directory: document.getElementById("tab-directory"),
   guardian: document.getElementById("tab-guardian"),
   community: document.getElementById("tab-community"),
+  assistant: document.getElementById("tab-assistant"),
 };
 
 function activateTab(btn) {
@@ -245,6 +273,9 @@ function activateTab(btn) {
   if (btn.dataset.tab === "community") {
     loadFeed();
   }
+  if (btn.dataset.tab === "assistant") {
+    loadAssistantHistory();
+  }
 }
 
 tabButtons.forEach((btn, i) => {
@@ -271,55 +302,308 @@ tabButtons.forEach((btn, i) => {
 // SOS
 // ---------------------------------------------------------------------------
 const sosBtn = document.getElementById("sosBtn");
+const sosBtnLabel = document.getElementById("sosBtnLabel");
+const sosCancelBtn = document.getElementById("sosCancelBtn");
 const sosStatus = document.getElementById("sosStatus");
+const sosStepTimeline = document.getElementById("sosStepTimeline");
 
-async function triggerSOS(triggerType = "manual") {
-  sosStatus.textContent = "Getting location & sending alert...";
-  const loc = await getLocation();
+const SOS_COUNTDOWN_SECONDS = 3;
+const SOS_LAST_LOCATION_KEY = "safeher_last_known_location";
+
+let sosCountdownTimer = null;
+let sosCancelled = false;
+let sosInFlight = false;
+
+function setSosStep(step, state) {
+  // state: "active" | "done"
+  const li = sosStepTimeline.querySelector(`[data-step="${step}"]`);
+  if (!li) return;
+  li.classList.remove("step-active", "step-done");
+  li.classList.add(state === "done" ? "step-done" : "step-active");
+}
+
+function resetSosSteps() {
+  sosStepTimeline.querySelectorAll("li").forEach((li) => li.classList.remove("step-active", "step-done"));
+}
+
+function setSosButtonState(state, text) {
+  sosBtn.classList.remove("sos-button-countdown", "sos-button-sending", "sos-button-success", "sos-button-error");
+  if (state) sosBtn.classList.add(`sos-button-${state}`);
+  sosBtnLabel.textContent = text;
+}
+
+// Accurate location with a real fallback chain: try a fresh high-accuracy
+// GPS fix first; if that fails or times out, fall back to the last known
+// location cached in this browser (clearly labeled as such downstream),
+// and only report "unavailable" if we have genuinely nothing.
+function getAccurateLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(getCachedLocationFallback());
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const loc = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy_m: pos.coords.accuracy,
+          location_source: "gps",
+        };
+        try {
+          localStorage.setItem(SOS_LAST_LOCATION_KEY, JSON.stringify({ ...loc, cached_at: Date.now() }));
+        } catch (e) { /* storage unavailable — non-fatal, just skip caching */ }
+        resolve(loc);
+      },
+      () => resolve(getCachedLocationFallback()),
+      { enableHighAccuracy: true, timeout: 6000, maximumAge: 0 }
+    );
+  });
+}
+
+function getCachedLocationFallback() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SOS_LAST_LOCATION_KEY) || "null");
+    if (cached && cached.latitude != null) {
+      return { latitude: cached.latitude, longitude: cached.longitude, accuracy_m: null, location_source: "cached" };
+    }
+  } catch (e) { /* ignore malformed cache */ }
+  return { latitude: null, longitude: null, accuracy_m: null, location_source: "unavailable" };
+}
+
+// Sends the alert with a couple of quick retries before giving up and
+// falling back to the offline queue — network blips shouldn't mean a
+// missed SOS.
+async function sendSosWithRetry(payload, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    const result = await api("/api/sos", { method: "POST", body: JSON.stringify(payload) });
+    if (result._ok) return result;
+    if (result._status && result._status >= 400 && result._status < 500 && result._status !== 429) {
+      // Client error (bad input, auth) — retrying won't help.
+      return result;
+    }
+    if (i < attempts - 1) {
+      sosStatus.textContent = `Network hiccup — retrying (${i + 2}/${attempts})…`;
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+  return { _ok: false };
+}
+
+async function runSosSendFlow(triggerType) {
+  sosInFlight = true;
+  setSosButtonState("sending", "Sending…");
+  sosStatus.textContent = "";
+  setSosStep("countdown", "done");
+  setSosStep("location", "active");
+
+  const loc = await getAccurateLocation();
+  setSosStep("location", "done");
+  setSosStep("sending", "active");
 
   if (!navigator.onLine) {
     queueOfflineAction("sos", { ...loc, trigger_type: triggerType, message: "SOS raised while offline" });
+    setSosButtonState("error", "Queued");
     sosStatus.textContent = "⚠️ Offline — SOS queued, will send the moment you're back online.";
+    finishSosFlow(4000, "SOS");
     return;
   }
 
-  try {
-    const result = await api("/api/sos", {
-      method: "POST",
-      body: JSON.stringify({ ...loc, trigger_type: triggerType }),
-    });
-    sosStatus.textContent = `Alert sent to ${result.contacts_notified} contact(s).`;
+  const result = await sendSosWithRetry({ ...loc, trigger_type: triggerType });
+
+  if (result._ok) {
+    setSosStep("sending", "done");
+    setSosStep("notified", "done");
+    setSosButtonState("success", "Sent ✓");
+    const locNote =
+      loc.location_source === "cached" ? " (using last known location)" :
+      loc.location_source === "unavailable" ? " (location unavailable)" : "";
+    sosStatus.textContent = `✓ Alert sent to ${result.contacts_notified} contact(s)${locNote}.`;
     loadAlerts();
-  } catch (err) {
-    // Network failed even though navigator.onLine said we were online
-    queueOfflineAction("sos", { ...loc, trigger_type: triggerType, message: "SOS raised while offline" });
-    sosStatus.textContent = "⚠️ Couldn't reach the server — SOS queued, will retry automatically.";
+    finishSosFlow(5000, "SOS");
+  } else {
+    queueOfflineAction("sos", { ...loc, trigger_type: triggerType, message: "SOS raised — server unreachable" });
+    setSosButtonState("error", "Queued");
+    sosStatus.textContent = "⚠️ Couldn't reach the server after retries — SOS queued, will retry automatically.";
+    finishSosFlow(5000, "SOS");
   }
 }
 
-sosBtn.addEventListener("click", () => triggerSOS("manual"));
+function finishSosFlow(delayMs, resetLabel) {
+  setTimeout(() => {
+    setSosButtonState(null, resetLabel);
+    sosCancelBtn.classList.add("hidden");
+    sosStepTimeline.classList.add("hidden");
+    resetSosSteps();
+    sosInFlight = false;
+  }, delayMs);
+}
+
+async function triggerSOS(triggerType = "manual") {
+  // Automatic triggers (audio ML, missed check-in, journey escalation) skip
+  // the countdown entirely — those are already confirmed emergencies and
+  // shouldn't be delayed by a cancel window meant for accidental taps.
+  if (triggerType !== "manual") {
+    await runSosSendFlow(triggerType);
+    return;
+  }
+  startSosCountdown();
+}
+
+function startSosCountdown() {
+  if (sosInFlight) return;
+  sosCancelled = false;
+  sosCancelBtn.classList.remove("hidden");
+  sosStepTimeline.classList.remove("hidden");
+  resetSosSteps();
+  setSosStep("countdown", "active");
+  sosStatus.textContent = "Tap Cancel if this was a mistake.";
+
+  let remaining = SOS_COUNTDOWN_SECONDS;
+  setSosButtonState("countdown", String(remaining));
+  sosCountdownTimer = setInterval(() => {
+    remaining -= 1;
+    if (sosCancelled) {
+      clearInterval(sosCountdownTimer);
+      return;
+    }
+    if (remaining <= 0) {
+      clearInterval(sosCountdownTimer);
+      runSosSendFlow("manual");
+      return;
+    }
+    setSosButtonState("countdown", String(remaining));
+  }, 1000);
+}
+
+sosBtn.addEventListener("click", () => {
+  if (sosInFlight) return;
+  triggerSOS("manual");
+});
+
+sosCancelBtn.addEventListener("click", () => {
+  sosCancelled = true;
+  if (sosCountdownTimer) clearInterval(sosCountdownTimer);
+  setSosButtonState(null, "SOS");
+  sosCancelBtn.classList.add("hidden");
+  sosStepTimeline.classList.add("hidden");
+  resetSosSteps();
+  sosStatus.textContent = "Cancelled.";
+  setTimeout(() => { if (sosStatus.textContent === "Cancelled.") sosStatus.textContent = ""; }, 3000);
+});
 
 // ---------------------------------------------------------------------------
 // Fake call
 // ---------------------------------------------------------------------------
 const fakeCallBtn = document.getElementById("fakeCallBtn");
 const fakeCallDelay = document.getElementById("fakeCallDelay");
+const fakeCallDelayCustom = document.getElementById("fakeCallDelayCustom");
+const fakeCallerName = document.getElementById("fakeCallerName");
+const fakeCallerNameCustom = document.getElementById("fakeCallerNameCustom");
+const fakeCallSilent = document.getElementById("fakeCallSilent");
 const fakeCallStatus = document.getElementById("fakeCallStatus");
 const overlay = document.getElementById("fakeCallOverlay");
 const acceptCallBtn = document.getElementById("acceptCallBtn");
 const declineCallBtn = document.getElementById("declineCallBtn");
+const callerAvatar = document.getElementById("callerAvatar");
+const callerNameEl = document.getElementById("callerName");
 
-const FAKE_SCRIPT = [
-  "Hey, where are you right now?",
-  "Okay, I'm coming to pick you up, stay right there.",
-  "I'm just two minutes away, keep talking to me.",
-];
+fakeCallDelay.addEventListener("change", () => {
+  fakeCallDelayCustom.classList.toggle("hidden", fakeCallDelay.value !== "__custom__");
+});
+fakeCallerName.addEventListener("change", () => {
+  fakeCallerNameCustom.classList.toggle("hidden", fakeCallerName.value !== "__custom__");
+});
+
+const FAKE_SCRIPTS = {
+  Mom: [
+    "Hey, where are you right now?",
+    "Okay, I'm coming to pick you up, stay right there.",
+    "I'm just two minutes away, keep talking to me.",
+  ],
+  Dad: [
+    "Hey, you almost done? Your mother's asking.",
+    "Alright, I'll swing by and get you, stay put.",
+    "Two minutes out, keep me on the line.",
+  ],
+  Boss: [
+    "Hey, sorry to call so late — you free to talk?",
+    "I just need you for a quick thing, shouldn't take long.",
+    "Okay, let's sort this out, I'm calling now.",
+  ],
+  "Best Friend": [
+    "Hey! Where are you, I've been trying to reach you.",
+    "Okay stay there, I'm literally two minutes away.",
+    "Keep talking to me, I'm almost there.",
+  ],
+  default: [
+    "Hey, where are you right now?",
+    "Okay, I'm coming to get you, stay right there.",
+    "I'm just two minutes away, keep talking to me.",
+  ],
+};
+
+function getSelectedCallerName() {
+  return fakeCallerName.value === "__custom__"
+    ? (fakeCallerNameCustom.value.trim() || "Unknown")
+    : fakeCallerName.value;
+}
+
+function getSelectedDelaySeconds() {
+  if (fakeCallDelay.value === "__custom__") {
+    return Math.max(1, parseInt(fakeCallDelayCustom.value, 10) || 5);
+  }
+  return parseInt(fakeCallDelay.value, 10);
+}
 
 fakeCallBtn.addEventListener("click", () => {
-  const delay = parseInt(fakeCallDelay.value, 10) * 1000;
-  fakeCallStatus.textContent = delay ? `Call scheduled in ${delay / 1000}s...` : "Calling now...";
-  setTimeout(showFakeCall, delay);
+  const delay = getSelectedDelaySeconds() * 1000;
+  const name = getSelectedCallerName();
+  fakeCallStatus.textContent = delay ? `Call from ${name} scheduled in ${delay / 1000}s…` : `Calling from ${name} now…`;
+  setTimeout(() => showFakeCall(name), delay);
 });
+
+// ---------------------------------------------------------------------
+// Ringtone (synthesized — no audio asset needed) + vibration
+// ---------------------------------------------------------------------
+let ringtoneContext = null;
+let ringtoneIntervalId = null;
+
+function playRingtoneTone() {
+  if (!ringtoneContext) return;
+  const now = ringtoneContext.currentTime;
+  [0, 0.35].forEach((offset) => {
+    const osc = ringtoneContext.createOscillator();
+    const gain = ringtoneContext.createGain();
+    osc.frequency.value = 950;
+    osc.type = "sine";
+    gain.gain.setValueAtTime(0.0001, now + offset);
+    gain.gain.exponentialRampToValueAtTime(0.25, now + offset + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.3);
+    osc.connect(gain).connect(ringtoneContext.destination);
+    osc.start(now + offset);
+    osc.stop(now + offset + 0.32);
+  });
+}
+
+function startRingtoneAndVibration() {
+  if (!fakeCallSilent.checked) {
+    try {
+      ringtoneContext = new (window.AudioContext || window.webkitAudioContext)();
+      playRingtoneTone();
+      ringtoneIntervalId = setInterval(playRingtoneTone, 2000);
+    } catch (e) { /* Web Audio unavailable — call screen still works silently */ }
+  }
+  if (navigator.vibrate) {
+    navigator.vibrate([500, 300, 500, 300, 500, 300, 500]);
+  }
+}
+
+function stopRingtoneAndVibration() {
+  if (ringtoneIntervalId) { clearInterval(ringtoneIntervalId); ringtoneIntervalId = null; }
+  if (ringtoneContext) { try { ringtoneContext.close(); } catch (e) {} ringtoneContext = null; }
+  if (navigator.vibrate) navigator.vibrate(0);
+}
 
 // ---------------------------------------------------------------------
 // Accessibility: focus trap for the fake-call modal overlay. While it's
@@ -347,45 +631,99 @@ function trapFocus(e) {
 function closeFakeCall() {
   overlay.classList.add("hidden");
   overlay.removeEventListener("keydown", trapFocus);
+  stopRingtoneAndVibration();
   if (fakeCallPreviouslyFocused && typeof fakeCallPreviouslyFocused.focus === "function") {
     fakeCallPreviouslyFocused.focus();
   }
 }
 
-function showFakeCall() {
+function showFakeCall(callerName) {
   fakeCallPreviouslyFocused = document.activeElement;
+  callerNameEl.textContent = callerName;
+  callerAvatar.textContent = (callerName.trim()[0] || "?").toUpperCase();
   overlay.classList.remove("hidden");
+  overlay.querySelector(".ringing").textContent = "ringing...";
   fakeCallStatus.textContent = "";
   overlay.addEventListener("keydown", trapFocus);
+  startRingtoneAndVibration();
   declineCallBtn.focus();
 }
 
 declineCallBtn.addEventListener("click", closeFakeCall);
 
 acceptCallBtn.addEventListener("click", () => {
+  stopRingtoneAndVibration();
   overlay.querySelector(".ringing").textContent = "00:01";
-  speakScript(0);
+  const script = FAKE_SCRIPTS[callerNameEl.textContent] || FAKE_SCRIPTS.default;
+  speakScript(script, 0);
 });
 
-function speakScript(i) {
-  if (i >= FAKE_SCRIPT.length) {
+function speakScript(script, i) {
+  if (i >= script.length) {
     setTimeout(closeFakeCall, 1500);
     return;
   }
   if (window.speechSynthesis) {
-    const utter = new SpeechSynthesisUtterance(FAKE_SCRIPT[i]);
+    const utter = new SpeechSynthesisUtterance(script[i]);
     utter.rate = 1;
-    utter.onend = () => setTimeout(() => speakScript(i + 1), 400);
+    utter.onend = () => setTimeout(() => speakScript(script, i + 1), 400);
     window.speechSynthesis.speak(utter);
   } else {
-    setTimeout(() => speakScript(i + 1), 2000);
+    setTimeout(() => speakScript(script, i + 1), 2000);
   }
 }
 
 // ---------------------------------------------------------------------------
 // FEATURE 1: Voice Distress Detection (with TensorFlow.js YAMNet fallback)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Voice Distress: waveform visualizer (shared by Listen + Audio ML modes)
+// ---------------------------------------------------------------------------
+function startWaveformVisualization(stream, canvas) {
+  const ctx = canvas.getContext("2d");
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+
+  canvas.classList.remove("hidden");
+  let rafId = null;
+
+  function draw() {
+    rafId = requestAnimationFrame(draw);
+    analyser.getByteTimeDomainData(data);
+    const w = canvas.width = canvas.clientWidth;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.beginPath();
+    ctx.strokeStyle = "#7C3AED";
+    ctx.lineWidth = 2;
+    const sliceWidth = w / data.length;
+    let x = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i] / 128.0;
+      const y = (v * h) / 2;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+      x += sliceWidth;
+    }
+    ctx.stroke();
+  }
+  draw();
+
+  return () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    canvas.classList.add("hidden");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    try { audioCtx.close(); } catch (e) { /* already closed */ }
+  };
+}
+
 const listenBtn = document.getElementById("listenBtn");
+
+
 const stopListenBtn = document.getElementById("stopListenBtn");
 const transcriptBox = document.getElementById("transcriptBox");
 const analyzeBtn = document.getElementById("analyzeBtn");
@@ -418,13 +756,25 @@ if (SpeechRecognition) {
   };
 }
 
-listenBtn.addEventListener("click", () => {
+const voiceWaveformCanvas = document.getElementById("voiceWaveform");
+let stopVoiceWaveform = null;
+let listeningWaveformStream = null;
+
+listenBtn.addEventListener("click", async () => {
   if (recognition) {
     recognition.start();
     listenBtn.disabled = true;
+    listenBtn.classList.add("listening-pulse");
     stopListenBtn.disabled = false;
     transcriptBox.value = "";
     distressResult.textContent = "";
+
+    // Waveform is purely visual feedback — SpeechRecognition itself
+    // doesn't expose raw audio, so this opens its own lightweight stream.
+    try {
+      listeningWaveformStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stopVoiceWaveform = startWaveformVisualization(listeningWaveformStream, voiceWaveformCanvas);
+    } catch (e) { /* mic permission denied for waveform — transcript still works via SpeechRecognition's own permission prompt */ }
   } else {
     distressResult.textContent = "Speech Recognition not supported in this browser";
   }
@@ -434,46 +784,125 @@ stopListenBtn.addEventListener("click", () => {
   if (recognition) {
     recognition.stop();
     listenBtn.disabled = false;
+    listenBtn.classList.remove("listening-pulse");
     stopListenBtn.disabled = true;
   }
+  if (stopVoiceWaveform) { stopVoiceWaveform(); stopVoiceWaveform = null; }
+  if (listeningWaveformStream) { listeningWaveformStream.getTracks().forEach((t) => t.stop()); listeningWaveformStream = null; }
 });
+
+const distressResultPanel = document.getElementById("distressResultPanel");
+const distressVerdict = document.getElementById("distressVerdict");
+const distressConfidenceFill = document.getElementById("distressConfidenceFill");
+const distressConfidenceLabel = document.getElementById("distressConfidenceLabel");
+const distressEmotionBadge = document.getElementById("distressEmotionBadge");
+const distressTranscriptHighlight = document.getElementById("distressTranscriptHighlight");
+
+function highlightKeywords(transcript, matched) {
+  let html = escapeHtml(transcript);
+  matched
+    .slice()
+    .sort((a, b) => b.length - a.length) // longer phrases first so they aren't partially overwritten by shorter substrings
+    .forEach((kw) => {
+      const escaped = escapeHtml(kw);
+      const re = new RegExp(`\\b(${escaped.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})\\b`, "gi");
+      html = html.replace(re, "<mark>$1</mark>");
+    });
+  return html;
+}
+
+const EMOTION_STYLES = {
+  fear: { emoji: "😨", cls: "badge-alert" },
+  anger: { emoji: "😠", cls: "badge-warn" },
+  neutral: { emoji: "😐", cls: "" },
+};
 
 analyzeBtn.addEventListener("click", async () => {
   const transcript = transcriptBox.value.trim();
   if (!transcript) {
     distressResult.textContent = "Please speak or type something first.";
+    distressResultPanel.classList.add("hidden");
     return;
   }
 
-  distressResult.textContent = "Analyzing...";
+  distressResult.textContent = "Analyzing…";
+  distressResultPanel.classList.add("hidden");
   const loc = await getLocation();
-  
-  try {
-    const result = await api("/api/distress-check", {
-      method: "POST",
-      body: JSON.stringify({
-        transcript,
-        location: loc,
-      }),
-    });
 
-    if (result.distress_detected) {
-      distressResult.innerHTML = `
-        <span style="color:#EF4444">🚨 DISTRESS DETECTED</span><br/>
-        Confidence: ${(result.confidence * 100).toFixed(0)}%<br/>
-        Matched keywords: ${result.matched.join(", ")}
-        ${result.auto_trigger_sos ? "<br/>⚠️ Auto-triggering SOS..." : ""}
-      `;
-      if (result.auto_trigger_sos) {
-        setTimeout(() => triggerSOS("audio_ml"), 1500);
-      }
-    } else {
-      distressResult.textContent = "No distress detected in transcript.";
-    }
-  } catch (err) {
-    distressResult.textContent = "Error analyzing transcript: " + err.message;
+  const result = await api("/api/distress-check", {
+    method: "POST",
+    body: JSON.stringify({ transcript, location: loc }),
+  });
+
+  if (!result._ok) {
+    distressResult.textContent = "Error analyzing transcript.";
+    return;
   }
+
+  distressResult.textContent = "";
+  distressResultPanel.classList.remove("hidden");
+
+  distressVerdict.innerHTML = result.distress_detected
+    ? `<span style="color:#EF4444; font-weight:700;">🚨 DISTRESS DETECTED</span>`
+    : `<span style="color:#0F9D70;">✓ No distress detected</span>`;
+
+  const confidencePct = Math.round((result.confidence || 0) * 100);
+  distressConfidenceFill.style.width = `${confidencePct}%`;
+  distressConfidenceFill.style.background = confidencePct >= 70 ? "var(--coral)" : confidencePct >= 40 ? "var(--warn)" : "var(--safe)";
+  distressConfidenceLabel.textContent = `${confidencePct}%`;
+
+  const emotion = result.emotion || { label: "neutral", intensity: 0 };
+  const style = EMOTION_STYLES[emotion.label] || EMOTION_STYLES.neutral;
+  distressEmotionBadge.className = `journey-badge ${style.cls}`;
+  distressEmotionBadge.textContent = `${style.emoji} Tone: ${emotion.label} (${Math.round(emotion.intensity * 100)}%)`;
+
+  distressTranscriptHighlight.innerHTML = result.matched && result.matched.length
+    ? `Matched: ${highlightKeywords(transcript, result.matched)}`
+    : "No keywords matched.";
+
+  if (result.auto_trigger_sos) {
+    distressVerdict.innerHTML += `<br/><span style="font-size:12px;">⚠️ Auto-triggering SOS…</span>`;
+    setTimeout(() => triggerSOS("audio_ml"), 1500);
+  } else if (result.cooldown_active) {
+    distressVerdict.innerHTML += `<br/><span style="font-size:12px; color:#888;">(Already alerted recently — not re-triggering to avoid spamming your contacts)</span>`;
+  }
+
+  loadVoiceHistory();
 });
+
+const voiceHistoryToggle = document.getElementById("voiceHistoryToggle");
+const voiceHistoryList = document.getElementById("voiceHistoryList");
+let voiceHistoryLoaded = false;
+
+voiceHistoryToggle.addEventListener("click", async () => {
+  const showing = !voiceHistoryList.classList.contains("hidden");
+  if (showing) {
+    voiceHistoryList.classList.add("hidden");
+    voiceHistoryToggle.textContent = "Show Transcript History";
+    return;
+  }
+  await loadVoiceHistory();
+  voiceHistoryList.classList.remove("hidden");
+  voiceHistoryToggle.textContent = "Hide Transcript History";
+});
+
+async function loadVoiceHistory() {
+  const rows = await api("/api/distress-check/history");
+  if (!Array.isArray(rows)) return;
+  voiceHistoryList.innerHTML = rows.length
+    ? rows
+        .map((r) => {
+          const icon = r.distress_detected ? "🚨" : "✓";
+          return `<li>
+            <strong>${icon} ${r.confidence != null ? Math.round(r.confidence * 100) + "%" : "—"}</strong>
+            ${r.emotion_label ? `<span class="muted" style="font-size:11px;"> · ${escapeHtml(r.emotion_label)}</span>` : ""}
+            <span style="font-size:11px; color:#888; float:right;">${relativeTime(r.created_at)}</span>
+            <br/><span style="font-size:12px;">${escapeHtml(r.transcript.slice(0, 140))}</span>
+          </li>`;
+        })
+        .join("")
+    : `<li class="muted" style="border:none;">No transcript analyses yet.</li>`;
+}
 
 // ---------------------------------------------------------------------------
 // TIER 1 FEATURE 1: Real audio ML deployment.
@@ -501,6 +930,7 @@ let audioMlStream = null;
 let audioMlProcessor = null;
 let audioMlBuffer = [];
 let audioMlBusy = false;
+let stopAudioMlWaveform = null;
 
 function hannWindow(n) {
   const w = new Float32Array(n);
@@ -637,7 +1067,11 @@ async function startAudioMlMonitoring() {
   source.connect(audioMlProcessor);
   audioMlProcessor.connect(audioMlContext.destination);
 
+  const audioMlWaveformCanvas = document.getElementById("audioMlWaveform");
+  stopAudioMlWaveform = startWaveformVisualization(audioMlStream, audioMlWaveformCanvas);
+
   audioMlBtn.disabled = true;
+  audioMlBtn.classList.add("listening-pulse");
   stopAudioMlBtn.disabled = false;
   audioMlResult.textContent = "Listening for distress audio...";
 }
@@ -686,7 +1120,9 @@ function stopAudioMlMonitoring() {
     audioMlStream = null;
   }
   audioMlBuffer = [];
+  if (stopAudioMlWaveform) { stopAudioMlWaveform(); stopAudioMlWaveform = null; }
   audioMlBtn.disabled = false;
+  audioMlBtn.classList.remove("listening-pulse");
   stopAudioMlBtn.disabled = true;
   audioMlResult.textContent = "Stopped.";
 }
@@ -753,41 +1189,416 @@ confirmSafeBtn.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Journey Mode
+// ---------------------------------------------------------------------------
+const journeyIdleView = document.getElementById("journeyIdleView");
+const journeyActiveView = document.getElementById("journeyActiveView");
+const journeyDestinationInput = document.getElementById("journeyDestination");
+const journeyEtaMinutesInput = document.getElementById("journeyEtaMinutes");
+const journeyGuardianSelect = document.getElementById("journeyGuardianSelect");
+const startJourneyBtn = document.getElementById("startJourneyBtn");
+const journeyStartStatus = document.getElementById("journeyStartStatus");
+const journeyActiveDestination = document.getElementById("journeyActiveDestination");
+const journeyActiveBadge = document.getElementById("journeyActiveBadge");
+const journeyCountdown = document.getElementById("journeyCountdown");
+const journeyProgressFill = document.getElementById("journeyProgressFill");
+const journeyDistanceRemaining = document.getElementById("journeyDistanceRemaining");
+const journeyArrivedBtn = document.getElementById("journeyArrivedBtn");
+const journeyExtendBtn = document.getElementById("journeyExtendBtn");
+const journeyCancelBtn = document.getElementById("journeyCancelBtn");
+const journeyTimelineToggle = document.getElementById("journeyTimelineToggle");
+const journeyTimelineList = document.getElementById("journeyTimelineList");
+const journeyStatusValue = document.getElementById("journeyStatusValue");
+const journeyStatusChip = document.getElementById("journeyStatusChip");
+const guardianStatusValue = document.getElementById("guardianStatusValue");
+const safetyScoreValue = document.getElementById("safetyScoreValue");
+
+let activeJourney = null;
+let journeyCountdownInterval = null;
+let journeyLocationInterval = null;
+let journeyPollInterval = null;
+
+function formatCountdown(totalSeconds) {
+  const s = Math.max(0, totalSeconds);
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+async function populateJourneyGuardianSelect() {
+  if (!journeyGuardianSelect) return;
+  const contacts = await api("/api/contacts");
+  if (!Array.isArray(contacts)) return;
+  const current = journeyGuardianSelect.value;
+  journeyGuardianSelect.innerHTML =
+    `<option value="">No guardian (alert all trusted contacts)</option>` +
+    contacts.map((c) => `<option value="${c.id}">${escapeHtml(c.name)} (${escapeHtml(c.relation || "contact")})</option>`).join("");
+  journeyGuardianSelect.value = current || "";
+}
+
+function renderJourneyBadge(journey) {
+  journeyActiveBadge.classList.remove("badge-safe", "badge-warn", "badge-alert");
+  if (journey.status === "arrived") {
+    journeyActiveBadge.textContent = "Arrived safely";
+    journeyActiveBadge.classList.add("badge-safe");
+  } else if (journey.status === "missed") {
+    journeyActiveBadge.textContent = "Alert sent";
+    journeyActiveBadge.classList.add("badge-alert");
+  } else if (journey.remaining_seconds < 120) {
+    journeyActiveBadge.textContent = "Check in soon";
+    journeyActiveBadge.classList.add("badge-warn");
+  } else {
+    journeyActiveBadge.textContent = "On track";
+    journeyActiveBadge.classList.add("badge-safe");
+  }
+}
+
+function renderJourney(journey) {
+  activeJourney = journey;
+
+  if (!journey || journey.status !== "active") {
+    journeyIdleView.classList.remove("hidden");
+    journeyActiveView.classList.add("hidden");
+    journeyStatusValue.textContent = "No active journey";
+    journeyStatusChip.classList.remove("hidden");
+    stopJourneyLiveUpdates();
+    return;
+  }
+
+  journeyIdleView.classList.add("hidden");
+  journeyActiveView.classList.remove("hidden");
+  journeyActiveDestination.textContent = journey.destination_name;
+  journeyStatusValue.textContent = `→ ${journey.destination_name}`;
+  journeyProgressFill.style.width = `${journey.time_progress_pct}%`;
+  journeyCountdown.textContent = formatCountdown(journey.remaining_seconds);
+  journeyDistanceRemaining.textContent =
+    journey.distance_remaining_km != null
+      ? `${journey.distance_remaining_km.toFixed(2)} km remaining to destination`
+      : "Live location tracking active";
+  renderJourneyBadge(journey);
+  startJourneyLiveUpdates();
+}
+
+function stopJourneyLiveUpdates() {
+  if (journeyCountdownInterval) { clearInterval(journeyCountdownInterval); journeyCountdownInterval = null; }
+  if (journeyLocationInterval) { clearInterval(journeyLocationInterval); journeyLocationInterval = null; }
+}
+
+function startJourneyLiveUpdates() {
+  stopJourneyLiveUpdates();
+
+  // Local 1s countdown ticker between server polls, so the timer doesn't
+  // visibly stall between the 15s /active polls below.
+  journeyCountdownInterval = setInterval(() => {
+    if (!activeJourney || activeJourney.status !== "active") return;
+    activeJourney.remaining_seconds = Math.max(0, activeJourney.remaining_seconds - 1);
+    journeyCountdown.textContent = formatCountdown(activeJourney.remaining_seconds);
+    if (activeJourney.remaining_seconds === 0) refreshActiveJourney();
+  }, 1000);
+
+  // Push a real location update to the server periodically so distance-to-
+  // destination and the breadcrumb (journey_events) stay current, and so
+  // arrival can be auto-detected.
+  journeyLocationInterval = setInterval(async () => {
+    if (!activeJourney) return;
+    const loc = await getLocation();
+    if (loc.latitude == null || loc.longitude == null) return;
+    const updated = await api(`/api/journey/${activeJourney.id}/location`, {
+      method: "POST",
+      body: JSON.stringify({ latitude: loc.latitude, longitude: loc.longitude }),
+    });
+    if (updated._ok) renderJourney(updated);
+    if (updated.status === "arrived") {
+      showNotification("✅ Destination reached", `You've arrived at ${updated.destination_name}.`, "info");
+    }
+  }, 20000);
+}
+
+async function refreshActiveJourney() {
+  const journey = await api("/api/journey/active");
+  if (journey === null || journey._ok === false) {
+    renderJourney(null);
+    return;
+  }
+  const wasActive = activeJourney && activeJourney.status === "active";
+  renderJourney(journey);
+  if (wasActive && journey.status === "missed") {
+    showNotification("🚨 Check-in missed", `No check-in for '${journey.destination_name}' — your guardian has been alerted.`, "critical");
+  }
+}
+
+startJourneyBtn.addEventListener("click", async () => {
+  const destination_name = journeyDestinationInput.value.trim();
+  const eta_minutes = parseInt(journeyEtaMinutesInput.value, 10);
+  const guardian_contact_id = journeyGuardianSelect.value ? parseInt(journeyGuardianSelect.value, 10) : null;
+
+  if (!destination_name) {
+    journeyStartStatus.textContent = "Enter a destination first.";
+    return;
+  }
+  if (!eta_minutes || eta_minutes < 1) {
+    journeyStartStatus.textContent = "ETA must be at least 1 minute.";
+    return;
+  }
+
+  startJourneyBtn.disabled = true;
+  journeyStartStatus.textContent = "Getting your location…";
+  const loc = await getLocation();
+
+  const journey = await api("/api/journey/start", {
+    method: "POST",
+    body: JSON.stringify({
+      destination_name,
+      eta_minutes,
+      guardian_contact_id,
+      origin_lat: loc.latitude,
+      origin_lng: loc.longitude,
+    }),
+  });
+
+  startJourneyBtn.disabled = false;
+  if (!journey._ok) {
+    journeyStartStatus.textContent = "Couldn't start journey. Please try again.";
+    return;
+  }
+  journeyStartStatus.textContent = "";
+  showNotification("🧭 Journey started", `Tracking your trip to ${destination_name}.`, "info");
+  renderJourney(journey);
+});
+
+journeyArrivedBtn.addEventListener("click", async () => {
+  if (!activeJourney) return;
+  const journey = await api(`/api/journey/${activeJourney.id}/arrived`, { method: "POST" });
+  if (journey._ok) {
+    showNotification("✅ Nice work", "Journey marked as complete.", "info");
+    renderJourney(journey);
+  }
+});
+
+journeyExtendBtn.addEventListener("click", async () => {
+  if (!activeJourney) return;
+  const journey = await api(`/api/journey/${activeJourney.id}/extend`, {
+    method: "POST",
+    body: JSON.stringify({ extra_minutes: 10 }),
+  });
+  if (journey._ok) renderJourney(journey);
+});
+
+journeyCancelBtn.addEventListener("click", async () => {
+  if (!activeJourney) return;
+  if (!confirm("Cancel this journey? Your guardian will not be alerted.")) return;
+  const journey = await api(`/api/journey/${activeJourney.id}/cancel`, { method: "POST" });
+  if (journey._ok) renderJourney(journey);
+});
+
+journeyTimelineToggle.addEventListener("click", async () => {
+  const showing = !journeyTimelineList.classList.contains("hidden");
+  if (showing) {
+    journeyTimelineList.classList.add("hidden");
+    journeyTimelineToggle.textContent = "Show Journey Timeline";
+    return;
+  }
+  if (!activeJourney) return;
+  const events = await api(`/api/journey/${activeJourney.id}/timeline`);
+  if (Array.isArray(events)) {
+    journeyTimelineList.innerHTML = events
+      .slice()
+      .reverse()
+      .map(
+        (e) =>
+          `<li><strong>${escapeHtml(e.event_type.replace(/_/g, " "))}</strong>${e.message ? " — " + escapeHtml(e.message) : ""} <span style="font-size:11px; color:#888;">${new Date(e.created_at).toLocaleTimeString()}</span></li>`
+      )
+      .join("");
+  }
+  journeyTimelineList.classList.remove("hidden");
+  journeyTimelineToggle.textContent = "Hide Journey Timeline";
+});
+
+// Poll for an already-in-progress journey (e.g. page reload mid-journey)
+// and keep checking every 15s in case it expires while this tab is idle
+// (e.g. the countdown ticker is throttled by the browser in a background tab).
+refreshActiveJourney();
+journeyPollInterval = setInterval(refreshActiveJourney, 15000);
+
+// ---------------------------------------------------------------------------
+// Dashboard status strip (Safety Score / Guardian chip)
+// ---------------------------------------------------------------------------
+async function refreshSafetyScoreChip() {
+  if (!safetyScoreValue) return;
+  const loc = await getLocation();
+  if (loc.latitude == null || loc.longitude == null) {
+    safetyScoreValue.textContent = "Enable location";
+    return;
+  }
+  const result = await api(`/api/safety-score?lat=${loc.latitude}&lng=${loc.longitude}`);
+  if (!result._ok || result.score == null) {
+    safetyScoreValue.textContent = "—";
+    return;
+  }
+  safetyScoreValue.textContent = `${result.score} · ${result.label}`;
+  safetyScoreValue.classList.remove("score-safe", "score-caution", "score-risk");
+  safetyScoreValue.classList.add(
+    result.score >= 80 ? "score-safe" : result.score >= 55 ? "score-caution" : "score-risk"
+  );
+}
+
+async function refreshGuardianChip() {
+  if (!guardianStatusValue) return;
+  const status = await api("/api/guardian/status");
+  guardianStatusValue.textContent = status && status.active ? "✓ Sharing live" : "Not sharing";
+}
+
+refreshSafetyScoreChip();
+refreshGuardianChip();
+setInterval(refreshGuardianChip, 30000);
+setTimeout(populateJourneyGuardianSelect, 200);
+
+// ---------------------------------------------------------------------------
 // Anonymous Record
 // ---------------------------------------------------------------------------
+// SECURITY/HONESTY FIX: the card's tags already claimed "Encrypted", but
+// nothing was ever actually encrypted, and nothing persisted anywhere —
+// a page refresh silently lost the recording. Recordings are now:
+//   1. Encrypted client-side with AES-GCM (Web Crypto API) before storage.
+//   2. Persisted in IndexedDB (this browser only — still "nothing leaves
+//      your device", just durable across reloads instead of living only
+//      in a Blob URL that dies with the tab).
+// Honest caveat: the encryption key is generated per-recording and stored
+// alongside the ciphertext in IndexedDB (not derived from a passphrase
+// kept elsewhere), since this is a no-backend, no-login-tied-storage
+// design. That protects against casual inspection of raw stored bytes
+// and matches "encrypted at rest", but isn't a zero-knowledge scheme —
+// anyone with access to this browser's IndexedDB can decrypt it, same as
+// they could already play back an unencrypted recording.
 const recordBtn = document.getElementById("recordBtn");
 const stopRecordBtn = document.getElementById("stopRecordBtn");
 const recordStatus = document.getElementById("recordStatus");
 const recordPlayback = document.getElementById("recordPlayback");
 const downloadRecordingLink = document.getElementById("downloadRecordingLink");
+const recordTimer = document.getElementById("recordTimer");
+const recordWaveformCanvas = document.getElementById("recordWaveform");
 
 let mediaRecorder = null;
 let recordedChunks = [];
+let recordStartTime = null;
+let recordTimerInterval = null;
+let stopRecordWaveform = null;
+let recordStream = null;
+
+const RECORDINGS_DB_NAME = "safeher_recordings";
+const RECORDINGS_STORE = "recordings";
+
+function openRecordingsDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(RECORDINGS_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(RECORDINGS_STORE, { keyPath: "id", autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveRecording(entry) {
+  const db = await openRecordingsDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(RECORDINGS_STORE, "readwrite");
+    tx.objectStore(RECORDINGS_STORE).add(entry);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getAllRecordings() {
+  const db = await openRecordingsDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(RECORDINGS_STORE, "readonly");
+    const req = tx.objectStore(RECORDINGS_STORE).getAll();
+    req.onsuccess = () => resolve(req.result.sort((a, b) => b.id - a.id));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function deleteRecording(id) {
+  const db = await openRecordingsDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(RECORDINGS_STORE, "readwrite");
+    tx.objectStore(RECORDINGS_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function encryptBlob(blob) {
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plainBuffer = await blob.arrayBuffer();
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plainBuffer);
+  const rawKey = await crypto.subtle.exportKey("raw", key);
+  return { ciphertext, iv, rawKey };
+}
+
+async function decryptToBlob(entry) {
+  const key = await crypto.subtle.importKey("raw", entry.rawKey, "AES-GCM", false, ["decrypt"]);
+  const plainBuffer = await crypto.subtle.decrypt({ name: "AES-GCM", iv: entry.iv }, key, entry.ciphertext);
+  return new Blob([plainBuffer], { type: entry.mimeType });
+}
+
+function formatDuration(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
 
 recordBtn.addEventListener("click", async () => {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
+    recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(recordStream);
     recordedChunks = [];
 
-    mediaRecorder.ondataavailable = (event) => {
-      recordedChunks.push(event.data);
-    };
+    mediaRecorder.ondataavailable = (event) => recordedChunks.push(event.data);
 
-    mediaRecorder.onstop = () => {
+    mediaRecorder.onstop = async () => {
+      const durationSeconds = (Date.now() - recordStartTime) / 1000;
       const blob = new Blob(recordedChunks, { type: "audio/webm" });
       const url = URL.createObjectURL(blob);
       recordPlayback.src = url;
       recordPlayback.classList.remove("hidden");
       downloadRecordingLink.href = url;
       downloadRecordingLink.classList.remove("hidden");
-      recordStatus.textContent = "Recording saved locally. Download if needed.";
+      recordStatus.textContent = "Encrypting and saving…";
+
+      try {
+        const { ciphertext, iv, rawKey } = await encryptBlob(blob);
+        await saveRecording({
+          timestamp: new Date().toISOString(),
+          duration: durationSeconds,
+          mimeType: "audio/webm",
+          ciphertext, iv, rawKey,
+        });
+        recordStatus.textContent = "🔒 Recording encrypted and saved to this device. Nothing was uploaded.";
+        refreshRecordingHistory();
+      } catch (e) {
+        recordStatus.textContent = "Recording saved locally (encryption unavailable in this browser).";
+      }
     };
 
     mediaRecorder.start();
+    recordStartTime = Date.now();
     recordBtn.disabled = true;
     stopRecordBtn.disabled = false;
-    recordStatus.textContent = "Recording... (privacy mode)";
+    recordBtn.classList.add("listening-pulse");
+    recordStatus.textContent = "⏺ Recording… (privacy mode)";
+    recordPlayback.classList.add("hidden");
+    downloadRecordingLink.classList.add("hidden");
+
+    recordTimer.classList.remove("hidden");
+    recordTimer.textContent = "00:00";
+    recordTimerInterval = setInterval(() => {
+      recordTimer.textContent = formatDuration((Date.now() - recordStartTime) / 1000);
+    }, 1000);
+
+    stopRecordWaveform = startWaveformVisualization(recordStream, recordWaveformCanvas);
   } catch (err) {
     recordStatus.textContent = "Microphone access denied: " + err.message;
   }
@@ -796,23 +1607,126 @@ recordBtn.addEventListener("click", async () => {
 stopRecordBtn.addEventListener("click", () => {
   if (mediaRecorder) {
     mediaRecorder.stop();
+    recordStream?.getTracks().forEach((t) => t.stop());
     recordBtn.disabled = false;
+    recordBtn.classList.remove("listening-pulse");
     stopRecordBtn.disabled = true;
   }
+  if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
+  recordTimer.classList.add("hidden");
+  if (stopRecordWaveform) { stopRecordWaveform(); stopRecordWaveform = null; }
 });
+
+const recordHistoryToggle = document.getElementById("recordHistoryToggle");
+const recordHistoryList = document.getElementById("recordHistoryList");
+
+recordHistoryToggle.addEventListener("click", async () => {
+  const showing = !recordHistoryList.classList.contains("hidden");
+  if (showing) {
+    recordHistoryList.classList.add("hidden");
+    recordHistoryToggle.textContent = "Show Recording History";
+    return;
+  }
+  await refreshRecordingHistory();
+  recordHistoryList.classList.remove("hidden");
+  recordHistoryToggle.textContent = "Hide Recording History";
+});
+
+async function refreshRecordingHistory() {
+  let recordings = [];
+  try {
+    recordings = await getAllRecordings();
+  } catch (e) {
+    recordHistoryList.innerHTML = `<li class="muted" style="border:none;">History unavailable in this browser.</li>`;
+    return;
+  }
+
+  recordHistoryList.innerHTML = recordings.length
+    ? recordings
+        .map(
+          (r) => `<li>
+            <strong>🔒 ${relativeTime(r.timestamp)}</strong>
+            <span class="muted" style="font-size:11px; float:right;">${formatDuration(r.duration)}</span>
+            <br/><span style="display:inline-flex; gap:6px; margin-top:6px;">
+              <button class="btn" style="padding:3px 10px; font-size:11px;" onclick="playStoredRecording(${r.id})">▶ Play</button>
+              <button class="btn secondary" style="padding:3px 10px; font-size:11px;" onclick="downloadStoredRecording(${r.id})">⬇ Download</button>
+              <button class="btn secondary" style="padding:3px 10px; font-size:11px;" onclick="deleteStoredRecording(${r.id})">🗑 Delete</button>
+            </span>
+          </li>`
+        )
+        .join("")
+    : `<li class="muted" style="border:none;">No recordings saved on this device yet.</li>`;
+}
+
+async function playStoredRecording(id) {
+  const recordings = await getAllRecordings();
+  const entry = recordings.find((r) => r.id === id);
+  if (!entry) return;
+  const blob = await decryptToBlob(entry);
+  recordPlayback.src = URL.createObjectURL(blob);
+  recordPlayback.classList.remove("hidden");
+  recordPlayback.play();
+}
+
+async function downloadStoredRecording(id) {
+  const recordings = await getAllRecordings();
+  const entry = recordings.find((r) => r.id === id);
+  if (!entry) return;
+  const blob = await decryptToBlob(entry);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `safeher-recording-${new Date(entry.timestamp).getTime()}.webm`;
+  a.click();
+}
+
+async function deleteStoredRecording(id) {
+  if (!confirm("Delete this recording? This cannot be undone.")) return;
+  await deleteRecording(id);
+  refreshRecordingHistory();
+}
 
 // ---------------------------------------------------------------------------
 // Recent Alerts
 // ---------------------------------------------------------------------------
 const alertsList = document.getElementById("alertsList");
 
+const SOS_TRIGGER_ICONS = {
+  manual: "🆘",
+  audio_ml: "🎙️",
+  audio_ml_deployed: "🎙️",
+  checkin_timeout: "⏱️",
+  journey_missed_checkin: "🧭",
+};
+
+function relativeTime(isoString) {
+  const then = new Date(isoString).getTime();
+  const diffSec = Math.round((Date.now() - then) / 1000);
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return new Date(isoString).toLocaleDateString();
+}
+
 async function loadAlerts() {
   const rows = await api("/api/alerts");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    alertsList.innerHTML = `<li class="muted" style="border:none;">No emergency alerts yet — that's a good thing.</li>`;
+    return;
+  }
   alertsList.innerHTML = rows
-    .map(
-      (r) =>
-        `<li><strong>${r.trigger_type}</strong> - ${r.message} <span style="font-size:11px; color:#888;">${new Date(r.created_at).toLocaleString()}</span></li>`
-    )
+    .map((r) => {
+      const icon = SOS_TRIGGER_ICONS[r.trigger_type] || "⚠️";
+      const mapLink =
+        r.latitude != null && r.longitude != null
+          ? `<a href="https://maps.google.com/?q=${r.latitude},${r.longitude}" target="_blank" rel="noopener" style="font-size:11px;">View location</a>`
+          : "";
+      return `<li>
+        <strong>${icon} ${escapeHtml(r.trigger_type.replace(/_/g, " "))}</strong>
+        <span style="font-size:11px; color:#888; float:right;">${relativeTime(r.created_at)}</span>
+        <br/><span style="font-size:12px;">${escapeHtml(r.message)}</span>
+        ${mapLink ? `<br/>${mapLink}` : ""}
+      </li>`;
+    })
     .join("");
 }
 
@@ -850,6 +1764,174 @@ let leafletMap = null;
 let markers = [];
 let selectedLocation = null;
 
+// Route Mode + layer state
+let mapMode = "audit"; // "audit" | "route"
+let routePoints = []; // [{lat,lng}, {lat,lng}]
+let routeMarkers = [];
+let routeLines = [];
+let riskZoneLayers = [];
+let serviceLayers = [];
+let showRiskZones = false;
+let showServices = false;
+
+const mapModeAuditBtn = document.getElementById("mapModeAuditBtn");
+const mapModeRouteBtn = document.getElementById("mapModeRouteBtn");
+const routeModePanel = document.getElementById("routeModePanel");
+const mapModeHint = document.getElementById("mapModeHint");
+const resetRouteBtn = document.getElementById("resetRouteBtn");
+const layerRiskZonesBtn = document.getElementById("layerRiskZonesBtn");
+const layerServicesBtn = document.getElementById("layerServicesBtn");
+const crowdDensityBadge = document.getElementById("crowdDensityBadge");
+const routeComparePanel = document.getElementById("routeComparePanel");
+
+mapModeAuditBtn.addEventListener("click", () => setMapMode("audit"));
+mapModeRouteBtn.addEventListener("click", () => setMapMode("route"));
+
+function setMapMode(mode) {
+  mapMode = mode;
+  mapModeAuditBtn.classList.toggle("active", mode === "audit");
+  mapModeRouteBtn.classList.toggle("active", mode === "route");
+  routeModePanel.classList.toggle("hidden", mode !== "route");
+  mapModeHint.textContent =
+    mode === "audit"
+      ? "Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits."
+      : "Tap the map to set your origin, then tap again to set your destination.";
+}
+
+resetRouteBtn.addEventListener("click", clearRoute);
+
+function clearRoute() {
+  routePoints = [];
+  routeMarkers.forEach((m) => leafletMap.removeLayer(m));
+  routeMarkers = [];
+  routeLines.forEach((l) => leafletMap.removeLayer(l));
+  routeLines = [];
+  routeResult.innerHTML = "";
+  routeComparePanel.innerHTML = "";
+}
+
+layerRiskZonesBtn.addEventListener("click", () => {
+  showRiskZones = !showRiskZones;
+  layerRiskZonesBtn.classList.toggle("active", showRiskZones);
+  if (showRiskZones) refreshMapLayers();
+  else {
+    riskZoneLayers.forEach((l) => leafletMap.removeLayer(l));
+    riskZoneLayers = [];
+    crowdDensityBadge.classList.add("hidden");
+  }
+});
+
+layerServicesBtn.addEventListener("click", () => {
+  showServices = !showServices;
+  layerServicesBtn.classList.toggle("active", showServices);
+  if (showServices) refreshServiceLayer();
+  else {
+    serviceLayers.forEach((l) => leafletMap.removeLayer(l));
+    serviceLayers = [];
+  }
+});
+
+async function refreshMapLayers() {
+  if (!leafletMap || !showRiskZones) return;
+  const center = leafletMap.getCenter();
+  const data = await api(`/api/risk-zones?lat=${center.lat}&lng=${center.lng}&radius_km=4`);
+  if (!data._ok) return;
+
+  riskZoneLayers.forEach((l) => leafletMap.removeLayer(l));
+  riskZoneLayers = [];
+  (data.zones || []).forEach((z) => {
+    const color = z.severity === "high" ? "#EF4444" : "#F59E0B";
+    const circle = L.circle([z.latitude, z.longitude], {
+      radius: z.radius_m,
+      color,
+      fillColor: color,
+      fillOpacity: 0.15,
+      weight: 1,
+    })
+      .addTo(leafletMap)
+      .bindPopup(`<strong>⚠️ ${escapeHtml(z.label)}</strong><br/>Safety score: ${z.score}/100<br/>Source: ${z.source === "audit" ? "Community audit" : "Recent risk alert"}`);
+    riskZoneLayers.push(circle);
+  });
+
+  crowdDensityBadge.textContent = `👥 ${data.crowd_density} SafeHer member(s) actively sharing location nearby`;
+  crowdDensityBadge.classList.remove("hidden");
+}
+
+const SERVICE_ICONS = { police: "🚓", hospital: "🏥", pharmacy: "💊", helpline: "📞" };
+
+async function refreshServiceLayer() {
+  if (!leafletMap || !showServices) return;
+  const center = leafletMap.getCenter();
+  const data = await api(`/api/nearby-services?lat=${center.lat}&lng=${center.lng}`);
+  if (!data._ok) return;
+
+  serviceLayers.forEach((l) => leafletMap.removeLayer(l));
+  serviceLayers = [];
+  (data.results || []).forEach((s) => {
+    if (s.lat == null || s.lng == null) return;
+    const icon = L.divIcon({ html: SERVICE_ICONS[s.type] || "📍", className: "service-div-icon", iconSize: [22, 22] });
+    const marker = L.marker([s.lat, s.lng], { icon })
+      .addTo(leafletMap)
+      .bindPopup(
+        `<strong>${escapeHtml(s.name)}</strong> (${escapeHtml(s.type)})<br/>${s.distance_km != null ? s.distance_km + " km away<br/>" : ""}${s.phone && s.phone !== "N/A" ? `<a href="tel:${escapeHtml(s.phone)}">📞 ${escapeHtml(s.phone)}</a>` : ""}`
+      );
+    serviceLayers.push(marker);
+  });
+}
+
+async function compareRoutes() {
+  if (routePoints.length !== 2) return;
+  const [a, b] = routePoints;
+  routeResult.textContent = "Checking route safety…";
+  routeComparePanel.innerHTML = "";
+
+  const result = await api("/api/route-safety", {
+    method: "POST",
+    body: JSON.stringify({
+      origin: "Point A", destination: "Point B",
+      origin_lat: a.lat, origin_lng: a.lng,
+      destination_lat: b.lat, destination_lng: b.lng,
+      compare_alternatives: true,
+    }),
+  });
+  if (!result._ok) {
+    routeResult.textContent = "Couldn't check route safety right now.";
+    return;
+  }
+
+  routeLines.forEach((l) => leafletMap.removeLayer(l));
+  routeLines = [];
+
+  const routes = result.routes || [];
+  routeResult.innerHTML = routes.length
+    ? `<strong>${routes.length > 1 ? "Route Comparison" : "Route Safety"}</strong><br/><span class="muted" style="font-size:11px;">${escapeHtml(result.note || "")}</span>`
+    : "No route data available.";
+
+  routeComparePanel.innerHTML = routes
+    .map((r, i) => {
+      const color = scoreColor(r.score);
+      return `<div class="route-card" style="border-left:4px solid ${color};">
+        <strong>${escapeHtml(r.label)}</strong>
+        <p style="margin:4px 0; font-size:12px;" class="muted">
+          ${r.distance_km} km${r.duration_min != null ? " · " + Math.round(r.duration_min) + " min" : ""}
+        </p>
+        <p style="margin:0;"><span style="color:${color}; font-weight:700;">${r.score}/100 — ${escapeHtml(r.rating)}</span></p>
+        <p style="margin:4px 0 0; font-size:11px;" class="muted">⚠️ ${r.risk_zones_crossed} risk zone(s) along this path</p>
+      </div>`;
+    })
+    .join("");
+
+  routes.forEach((r) => {
+    if (!r.geometry || r.geometry.length < 2) return;
+    const line = L.polyline(r.geometry, { color: scoreColor(r.score), weight: 4, opacity: 0.75 }).addTo(leafletMap);
+    routeLines.push(line);
+  });
+  if (routes.length) {
+    const bounds = L.latLngBounds(routes.flatMap((r) => r.geometry || []));
+    if (bounds.isValid()) leafletMap.fitBounds(bounds, { padding: [30, 30] });
+  }
+}
+
 function initMap() {
   if (CDN_FAILED.leaflet || typeof L === "undefined") {
     const mapEl = document.getElementById("leafletMap");
@@ -868,6 +1950,10 @@ function initMap() {
   }).addTo(leafletMap);
 
   leafletMap.on("click", (e) => {
+    if (mapMode === "route") {
+      handleRouteModeClick(e.latlng);
+      return;
+    }
     selectedLocation = e.latlng;
     if (markers.length > 0) {
       leafletMap.removeLayer(markers[markers.length - 1]);
@@ -887,7 +1973,26 @@ function initMap() {
     setTimeout(showAuditModal, 300);
   });
 
+  leafletMap.on("moveend", () => {
+    if (showRiskZones) refreshMapLayers();
+    if (showServices) refreshServiceLayer();
+  });
+
   loadAndDisplayAudits();
+}
+
+function handleRouteModeClick(latlng) {
+  if (routePoints.length >= 2) clearRoute();
+
+  const label = routePoints.length === 0 ? "A" : "B";
+  const color = label === "A" ? "#0F9D70" : "#EF4444";
+  const marker = L.marker([latlng.lat, latlng.lng], {
+    icon: L.divIcon({ html: `<div class="route-pin" style="background:${color};"><span>${label}</span></div>`, className: "", iconSize: [26, 26] }),
+  }).addTo(leafletMap);
+  routeMarkers.push(marker);
+  routePoints.push({ lat: latlng.lat, lng: latlng.lng });
+
+  if (routePoints.length === 2) compareRoutes();
 }
 
 async function loadAndDisplayAudits() {
@@ -957,39 +2062,9 @@ submitAuditBtn.addEventListener("click", async () => {
 });
 
 // Route safety check
-const originInput = document.getElementById("originInput");
-const destInput = document.getElementById("destInput");
-const routeCheckBtn = document.getElementById("routeCheckBtn");
 const routeResult = document.getElementById("routeResult");
 
-routeCheckBtn.addEventListener("click", async () => {
-  const origin = originInput.value.trim();
-  const destination = destInput.value.trim();
-  if (!origin || !destination) {
-    routeResult.textContent = "Please enter both origin and destination.";
-    return;
-  }
-
-  routeResult.textContent = "Checking route safety...";
-  const result = await api("/api/route-safety", {
-    method: "POST",
-    body: JSON.stringify({ origin, destination }),
-  });
-
-  if (!result._ok) {
-    routeResult.textContent = "Couldn't check that route. Please try again.";
-    return;
-  }
-
-  const scoreColorFor = result.color === "green" ? "#22C55E" : result.color === "orange" ? "#F59E0B" : "#EF4444";
-  routeResult.innerHTML = `
-    <strong>Route Safety Assessment:</strong><br/>
-    ${result.origin} → ${result.destination}<br/>
-    Estimated Safety Score: ${result.score}/100<br/>
-    Status: <span style="color: ${scoreColorFor}">${result.rating}</span>
-  `;
-});
-
+// Route safety checks are handled by the map route-mode flow above.
 // Initialize map when tab loads
 setTimeout(initMap, 100);
 
@@ -1042,33 +2117,133 @@ filterBtns.forEach((btn) => {
 async function loadServices(serviceType) {
   const loc = await getLocation();
   if (!loc.latitude || !loc.longitude) {
-    servicesList.innerHTML = '<li>Location not available</li>';
+    servicesList.innerHTML = '<li class="muted" style="border:none;">Location not available</li>';
     return;
   }
 
-  const res = await fetch(
-    `/api/nearby-services?lat=${loc.latitude}&lng=${loc.longitude}${serviceType ? "&type=" + serviceType : ""}`
-  );
-  const results = await res.json();
+  const data = await api(`/api/nearby-services?lat=${loc.latitude}&lng=${loc.longitude}${serviceType ? "&type=" + serviceType : ""}`);
+  if (!data._ok || !Array.isArray(data.results) || data.results.length === 0) {
+    servicesList.innerHTML = '<li class="muted" style="border:none;">No nearby services found.</li>';
+    return;
+  }
 
-  servicesList.innerHTML = results
-    .map(
-      (s) =>
-        `<li style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-          <span><strong>${s.name}</strong> (${s.type})<br/><span style="font-size:11px; color:#888;">${s.address}</span></span>
-          ${
-            s.phone && s.phone !== "N/A"
-              ? `<a href="tel:${s.phone}" class="tel-call-btn">Call</a>`
-              : ""
-          }
-        </li>`
-    )
+  servicesList.innerHTML = data.results
+    .map((s) => {
+      const icon = SERVICE_ICONS[s.type] || "📍";
+      const callLink =
+        s.phone && s.phone !== "N/A"
+          ? `<a href="tel:${escapeHtml(s.phone)}" class="tel-call-btn">📞 Call</a>`
+          : "";
+      const navLink =
+        s.lat != null && s.lng != null
+          ? `<a href="https://maps.google.com/?q=${s.lat},${s.lng}" target="_blank" rel="noopener" class="btn secondary" style="padding:5px 12px; font-size:11px;">🧭 Navigate</a>`
+          : "";
+      const openStatus = s.open_status || { status: "hours_vary", label: "Hours vary" };
+      const openBadgeClass = openStatus.status === "open_24_7" ? "badge-safe" : "";
+      return `<li class="service-card">
+        <div class="service-card-header">
+          <span class="service-card-icon">${icon}</span>
+          <div>
+            <strong>${escapeHtml(s.name)}</strong>
+            <div class="muted" style="font-size:11px; text-transform:capitalize;">${escapeHtml(s.type)}</div>
+          </div>
+          ${s.distance_km != null ? `<span class="service-card-distance">${s.distance_km} km</span>` : ""}
+        </div>
+        <span class="journey-badge ${openBadgeClass}" style="margin-top:8px;">${escapeHtml(openStatus.label)}</span>
+        <div class="service-card-actions">${callLink}${navLink}</div>
+      </li>`;
+    })
     .join("");
 }
 
 // ---------------------------------------------------------------------------
-// Guardian / Bubble Location Sharing
+// AI Assistant
 // ---------------------------------------------------------------------------
+const assistantChatWindow = document.getElementById("assistantChatWindow");
+const assistantSuggestions = document.getElementById("assistantSuggestions");
+const assistantInput = document.getElementById("assistantInput");
+const assistantSendBtn = document.getElementById("assistantSendBtn");
+
+const DEFAULT_ASSISTANT_SUGGESTIONS = [
+  "What should I do if I feel unsafe?",
+  "Find police near me",
+  "Plan a safe route home",
+  "How do I use the SOS button?",
+  "What counts as harassment?",
+];
+
+function appendAssistantMessage(role, text) {
+  const div = document.createElement("div");
+  div.className = `assistant-message ${role === "user" ? "assistant-user" : "assistant-bot"}`;
+  const p = document.createElement("p");
+  p.textContent = text; // textContent, not innerHTML — no need to trust-and-escape since it's never HTML
+  div.appendChild(p);
+  assistantChatWindow.appendChild(div);
+  assistantChatWindow.scrollTop = assistantChatWindow.scrollHeight;
+}
+
+function renderAssistantSuggestions(suggestions) {
+  assistantSuggestions.innerHTML = (suggestions || DEFAULT_ASSISTANT_SUGGESTIONS)
+    .map((s) => `<button class="assistant-suggestion-chip">${escapeHtml(s)}</button>`)
+    .join("");
+  assistantSuggestions.querySelectorAll(".assistant-suggestion-chip").forEach((chip) => {
+    chip.addEventListener("click", () => sendAssistantMessage(chip.textContent));
+  });
+}
+
+async function sendAssistantMessage(text) {
+  const message = (text || assistantInput.value).trim();
+  if (!message) return;
+
+  appendAssistantMessage("user", message);
+  assistantInput.value = "";
+  assistantSendBtn.disabled = true;
+
+  const thinkingDiv = document.createElement("div");
+  thinkingDiv.className = "assistant-message assistant-bot";
+  thinkingDiv.innerHTML = `<p class="muted">…</p>`;
+  assistantChatWindow.appendChild(thinkingDiv);
+  assistantChatWindow.scrollTop = assistantChatWindow.scrollHeight;
+
+  const loc = await getLocation();
+  const result = await api("/api/assistant/chat", {
+    method: "POST",
+    body: JSON.stringify({ message, latitude: loc.latitude, longitude: loc.longitude }),
+  });
+
+  thinkingDiv.remove();
+  assistantSendBtn.disabled = false;
+
+  if (!result._ok) {
+    appendAssistantMessage("assistant", "Sorry, something went wrong. Please try again.");
+    return;
+  }
+  appendAssistantMessage("assistant", result.reply);
+  renderAssistantSuggestions(result.suggestions);
+}
+
+assistantSendBtn.addEventListener("click", () => sendAssistantMessage());
+assistantInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendAssistantMessage();
+});
+
+let assistantHistoryLoaded = false;
+
+async function loadAssistantHistory() {
+  if (assistantHistoryLoaded) return;
+  assistantHistoryLoaded = true;
+  const rows = await api("/api/assistant/history");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    renderAssistantSuggestions();
+    return;
+  }
+  assistantChatWindow.innerHTML = "";
+  rows.forEach((r) => appendAssistantMessage(r.role, r.message));
+  renderAssistantSuggestions();
+}
+
+renderAssistantSuggestions();
+
 let bubbleMap = null;
 const shareLocationBtn = document.getElementById("shareLocationBtn");
 const stopSharingBtn = document.getElementById("stopSharingBtn");
@@ -1102,7 +2277,7 @@ async function loadContacts() {
   contactsList.innerHTML = contacts
     .map(
       (c) =>
-        `<li><strong>${c.name}</strong> (${c.relation || "contact"})<br/><span style="font-size:11px; color:#888;">${c.phone}${c.email ? " · " + c.email : ""}</span>
+        `<li><strong>${escapeHtml(c.name)}</strong> (${escapeHtml(c.relation || "contact")})<br/><span style="font-size:11px; color:#888;">${escapeHtml(c.phone)}${c.email ? " · " + escapeHtml(c.email) : ""}</span>
         <button style="float:right; padding:4px 8px; font-size:11px; cursor:pointer;" onclick="deleteContact(${c.id})">Delete</button></li>`
     )
     .join("");
@@ -1207,6 +2382,16 @@ function drawBreadcrumb() {
   bubbleMap.setView(latest, 15);
 }
 
+async function getBatteryLevel() {
+  try {
+    if (navigator.getBattery) {
+      const battery = await navigator.getBattery();
+      return Math.round(battery.level * 100);
+    }
+  } catch (e) { /* Battery Status API unavailable in this browser — non-fatal */ }
+  return null;
+}
+
 async function sendLocationUpdate() {
   const loc = await getLocation();
   if (loc.latitude == null || loc.longitude == null) return;
@@ -1216,7 +2401,8 @@ async function sendLocationUpdate() {
   drawBreadcrumb();
 
   if (socket && socket.connected) {
-    socket.emit("location_update", { latitude: loc.latitude, longitude: loc.longitude });
+    const battery_level = await getBatteryLevel();
+    socket.emit("location_update", { latitude: loc.latitude, longitude: loc.longitude, battery_level });
   }
 }
 
@@ -1246,9 +2432,20 @@ stopTrackingBtn.addEventListener("click", async () => {
 // contact-account feature) can join a user's tracking room to get updates:
 // socket.emit("join_tracking", { user_id: <id> });
 socket.on("contact_location_update", (data) => {
-  breadcrumbTrail.push([data.latitude, data.longitude]);
-  if (breadcrumbTrail.length > 50) breadcrumbTrail.shift();
-  drawBreadcrumb();
+  if (data.user_id === window.CURRENT_USER_ID) {
+    // This is our own continuous tracking echoing back (e.g. a second
+    // open tab) — draw it on our own breadcrumb trail.
+    breadcrumbTrail.push([data.latitude, data.longitude]);
+    if (breadcrumbTrail.length > 50) breadcrumbTrail.shift();
+    drawBreadcrumb();
+  } else if (data.user_id === currentlyTrackingUserId) {
+    // A Bubble member we're actively watching — move their marker, and
+    // refresh the Guardian Dashboard's "last updated"/connection/battery.
+    updateTrackedLocationOnMap(data);
+    updateGuardianDashboardFromLocationUpdate(data);
+  }
+  // Any other user_id shouldn't reach this socket at all (room-scoped
+  // server-side), but is ignored defensively either way.
 });
 
 // Initialize Guardian map
@@ -1268,6 +2465,56 @@ const canTrackMeList = document.getElementById("canTrackMeList");
 const trackableSelect = document.getElementById("trackableSelect");
 const viewTrackingBtn = document.getElementById("viewTrackingBtn");
 const stopViewTrackingBtn = document.getElementById("stopViewTrackingBtn");
+const guardianDashboard = document.getElementById("guardianDashboard");
+const emergencyNotificationBanner = document.getElementById("emergencyNotificationBanner");
+const gdConnectionStatus = document.getElementById("gdConnectionStatus");
+const gdBatteryLevel = document.getElementById("gdBatteryLevel");
+const gdLastUpdated = document.getElementById("gdLastUpdated");
+const gdJourneyStatus = document.getElementById("gdJourneyStatus");
+const gdJourneyProgressTrack = document.getElementById("gdJourneyProgressTrack");
+const gdJourneyProgressFill = document.getElementById("gdJourneyProgressFill");
+
+let guardianDashboardPollId = null;
+
+const CONNECTION_LABELS = {
+  live: "🟢 Live",
+  recent: "🟡 Recent",
+  stale: "🟠 Stale",
+  never_connected: "⚪ No data yet",
+};
+
+function renderGuardianDashboard(status) {
+  gdConnectionStatus.textContent = CONNECTION_LABELS[status.connection_status] || "—";
+  gdBatteryLevel.textContent = status.battery_level != null ? `🔋 ${status.battery_level}%` : "Not reported";
+  gdLastUpdated.textContent = status.last_location ? relativeTime(status.last_location.timestamp) : "Never";
+
+  if (status.active_journey) {
+    const j = status.active_journey;
+    gdJourneyStatus.textContent = `→ ${j.destination_name} (${formatCountdown(j.remaining_seconds)} left)`;
+    gdJourneyProgressTrack.style.display = "block";
+    gdJourneyProgressFill.style.width = `${j.time_progress_pct}%`;
+  } else {
+    gdJourneyStatus.textContent = "No active journey";
+    gdJourneyProgressTrack.style.display = "none";
+  }
+}
+
+function updateGuardianDashboardFromLocationUpdate(data) {
+  gdConnectionStatus.textContent = CONNECTION_LABELS.live;
+  gdLastUpdated.textContent = "just now";
+  if (data.battery_level != null) gdBatteryLevel.textContent = `🔋 ${data.battery_level}%`;
+}
+
+async function refreshGuardianDashboard() {
+  if (!currentlyTrackingUserId) return;
+  const status = await api(`/api/guardian/watch/${currentlyTrackingUserId}/status`);
+  if (status._ok) renderGuardianDashboard(status);
+}
+
+function showEmergencyBanner(text) {
+  emergencyNotificationBanner.textContent = text;
+  emergencyNotificationBanner.classList.remove("hidden");
+}
 
 let currentlyTrackingUserId = null;
 let trackedMarker = null;
@@ -1285,7 +2532,7 @@ async function loadLinkedContacts() {
   incomingInvitesList.innerHTML = incoming.length
     ? incoming
         .map(
-          (r) => `<li>${r.owner_email} invited you to their Bubble
+          (r) => `<li>${escapeHtml(r.owner_email)} invited you to their Bubble
             <button class="btn" style="padding:2px 8px;font-size:11px;" onclick="respondToInvite(${r.id}, true)">Accept</button>
             <button class="btn secondary" style="padding:2px 8px;font-size:11px;" onclick="respondToInvite(${r.id}, false)">Decline</button></li>`
         )
@@ -1294,12 +2541,12 @@ async function loadLinkedContacts() {
 
   canTrackMeList.innerHTML = viewers.length
     ? viewers
-        .map((r) => `<li>${r.contact_email} <span class="muted" style="font-size:11px;">(${r.status})</span></li>`)
+        .map((r) => `<li>${escapeHtml(r.contact_email)} <span class="muted" style="font-size:11px;">(${escapeHtml(r.status)})</span></li>`)
         .join("")
     : `<li class="muted">No one can see your live location yet</li>`;
 
   trackableSelect.innerHTML = accepted.length
-    ? accepted.map((r) => `<option value="${r.owner_user_id}">${r.owner_email}</option>`).join("")
+    ? accepted.map((r) => `<option value="${r.owner_user_id}">${escapeHtml(r.owner_email)}</option>`).join("")
     : `<option value="">No accepted Bubble members yet</option>`;
   viewTrackingBtn.disabled = accepted.length === 0;
 }
@@ -1333,6 +2580,11 @@ viewTrackingBtn?.addEventListener("click", () => {
   socket.emit("join_tracking", { user_id: targetUserId });
   viewTrackingBtn.classList.add("hidden");
   stopViewTrackingBtn.classList.remove("hidden");
+
+  guardianDashboard.classList.remove("hidden");
+  emergencyNotificationBanner.classList.add("hidden");
+  refreshGuardianDashboard();
+  guardianDashboardPollId = setInterval(refreshGuardianDashboard, 15000);
 });
 
 stopViewTrackingBtn?.addEventListener("click", () => {
@@ -1350,6 +2602,11 @@ function stopTrackingUI() {
   }
   viewTrackingBtn?.classList.remove("hidden");
   stopViewTrackingBtn?.classList.add("hidden");
+  guardianDashboard?.classList.add("hidden");
+  if (guardianDashboardPollId) {
+    clearInterval(guardianDashboardPollId);
+    guardianDashboardPollId = null;
+  }
 }
 
 function updateTrackedLocationOnMap(data) {
@@ -1379,20 +2636,141 @@ const feedAreaName = document.getElementById("feedAreaName");
 const feedMessage = document.getElementById("feedMessage");
 const postFeedBtn = document.getElementById("postFeedBtn");
 const feedList = document.getElementById("feedList");
+const feedSearchInput = document.getElementById("feedSearchInput");
+const feedFilterType = document.getElementById("feedFilterType");
+const feedSortToggle = document.getElementById("feedSortToggle");
+const trendingList = document.getElementById("trendingList");
+
+let feedSort = "recent";
+let feedSearchDebounce = null;
+
+const POST_TYPE_LABELS = { alert: "⚠️ ALERT", safe_spot: "✅ SAFE SPOT", incident: "🚨 INCIDENT" };
+
+function renderFeedPost(p) {
+  return `<li data-post-id="${p.id}">
+    <strong>${POST_TYPE_LABELS[p.post_type] || escapeHtml(p.post_type.toUpperCase())}</strong> - ${escapeHtml(p.message)}
+    ${p.area_name ? `<br/><span style="font-size:11px; color:#888;">📍 ${escapeHtml(p.area_name)}</span>` : ""}
+    <span style="font-size:11px; color:#888; float:right;">${relativeTime(p.created_at)}</span>
+    <div class="feed-reaction-row">
+      <button class="feed-reaction-btn ${p.user_has_liked ? "active" : ""}" onclick="toggleFeedLike(${p.id})">❤️ <span>${p.like_count || 0}</span></button>
+      <button class="feed-reaction-btn ${p.user_has_voted_helpful ? "active" : ""}" onclick="toggleFeedHelpful(${p.id})">👍 Helpful <span>${p.helpful_count || 0}</span></button>
+      <button class="feed-reaction-btn" onclick="toggleFeedComments(${p.id})">💬 <span>${p.comment_count || 0}</span></button>
+    </div>
+    <div class="feed-comments hidden" id="feedComments-${p.id}">
+      <ul class="feed-comment-list" id="feedCommentList-${p.id}"></ul>
+      <div class="row" style="margin-top:6px;">
+        <input type="text" placeholder="Add a comment…" id="feedCommentInput-${p.id}" maxlength="500" />
+        <button class="btn secondary" style="padding:6px 12px;" onclick="submitFeedComment(${p.id})">Post</button>
+      </div>
+    </div>
+  </li>`;
+}
 
 async function loadFeed() {
-  const posts = await api("/api/feed");
-  feedList.innerHTML = posts
+  const params = new URLSearchParams();
+  if (feedSearchInput.value.trim()) params.set("q", feedSearchInput.value.trim());
+  if (feedFilterType.value) params.set("post_type", feedFilterType.value);
+  params.set("sort", feedSort);
+
+  const posts = await api(`/api/feed?${params.toString()}`);
+  if (!Array.isArray(posts)) return;
+  feedList.innerHTML = posts.length
+    ? posts.map(renderFeedPost).join("")
+    : `<li class="muted" style="border:none;">No posts match your search.</li>`;
+}
+
+async function loadTrendingStrip() {
+  const posts = await api("/api/feed/trending");
+  if (!Array.isArray(posts) || posts.length === 0) {
+    trendingList.innerHTML = `<li class="muted" style="border:none; font-size:12px;">Nothing trending in the last 48h.</li>`;
+    return;
+  }
+  trendingList.innerHTML = posts
     .map(
       (p) =>
-        `<li>
-      <strong>${p.post_type.toUpperCase()}</strong> - ${p.message}
-      ${p.area_name ? `<br/><span style="font-size:11px; color:#888;">📍 ${p.area_name}</span>` : ""}
-      <span style="font-size:11px; color:#888; float:right;">${new Date(p.created_at).toLocaleString()}</span>
-    </li>`
+        `<li style="font-size:12px;"><strong>${POST_TYPE_LABELS[p.post_type] || escapeHtml(p.post_type)}</strong> ${escapeHtml(p.message.slice(0, 80))}
+        <span class="muted" style="float:right;">❤️ ${p.like_count} · 👍 ${p.helpful_count} · 💬 ${p.comment_count}</span></li>`
     )
     .join("");
 }
+
+async function toggleFeedLike(postId) {
+  const result = await api(`/api/feed/${postId}/like`, { method: "POST" });
+  if (!result._ok) return;
+  const li = feedList.querySelector(`li[data-post-id="${postId}"]`);
+  const btn = li?.querySelector(".feed-reaction-btn");
+  if (btn) {
+    btn.classList.toggle("active", result.liked);
+    btn.querySelector("span").textContent = result.like_count;
+  }
+}
+
+async function toggleFeedHelpful(postId) {
+  const result = await api(`/api/feed/${postId}/helpful`, { method: "POST" });
+  if (!result._ok) return;
+  const li = feedList.querySelector(`li[data-post-id="${postId}"]`);
+  const btn = li?.querySelectorAll(".feed-reaction-btn")[1];
+  if (btn) {
+    btn.classList.toggle("active", result.helpful);
+    btn.querySelector("span").textContent = result.helpful_count;
+  }
+}
+
+async function refreshFeedCommentList(postId) {
+  const comments = await api(`/api/feed/${postId}/comments`);
+  const list = document.getElementById(`feedCommentList-${postId}`);
+  if (Array.isArray(comments) && list) {
+    list.innerHTML = comments.length
+      ? comments
+          .map(
+            (c) =>
+              `<li style="font-size:12px;"><strong>${escapeHtml((c.user_email || "someone").split("@")[0])}</strong>: ${escapeHtml(c.message)}
+              <span class="muted" style="float:right; font-size:10px;">${relativeTime(c.created_at)}</span></li>`
+          )
+          .join("")
+      : `<li class="muted" style="font-size:12px; border:none;">No comments yet — be the first.</li>`;
+  }
+}
+
+async function toggleFeedComments(postId) {
+  const panel = document.getElementById(`feedComments-${postId}`);
+  if (!panel) return;
+  const showing = !panel.classList.contains("hidden");
+  if (showing) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  await refreshFeedCommentList(postId);
+}
+
+async function submitFeedComment(postId) {
+  const input = document.getElementById(`feedCommentInput-${postId}`);
+  const message = input.value.trim();
+  if (!message) return;
+  const result = await api(`/api/feed/${postId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+  if (result._ok) {
+    input.value = "";
+    await refreshFeedCommentList(postId);
+    const li = feedList.querySelector(`li[data-post-id="${postId}"]`);
+    const btn = li?.querySelectorAll(".feed-reaction-btn")[2];
+    if (btn) btn.querySelector("span").textContent = result.comment_count;
+  }
+}
+
+feedSearchInput.addEventListener("input", () => {
+  clearTimeout(feedSearchDebounce);
+  feedSearchDebounce = setTimeout(loadFeed, 350);
+});
+feedFilterType.addEventListener("change", loadFeed);
+feedSortToggle.addEventListener("click", () => {
+  feedSort = feedSort === "recent" ? "trending" : "recent";
+  feedSortToggle.textContent = feedSort === "recent" ? "Sort: Recent" : "Sort: 🔥 Trending";
+  loadFeed();
+});
 
 postFeedBtn.addEventListener("click", async () => {
   const message = feedMessage.value.trim();
@@ -1416,9 +2794,11 @@ postFeedBtn.addEventListener("click", async () => {
   feedMessage.value = "";
   feedAreaName.value = "";
   loadFeed();
+  loadTrendingStrip();
 });
 
 loadFeed();
+loadTrendingStrip();
 
 // ---------------------------------------------------------------------------
 // TIER 2 FEATURE: 2FA setup UI (account settings card on Home tab)

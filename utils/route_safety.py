@@ -1,26 +1,46 @@
 """
 Route safety scoring.
 
-Demo version: produces a heuristic safety score (0-100) using time-of-day
-and a small simulated "incident density" table, so it works with zero
-external API keys.
+Two modes:
+1. Text-only (`get_route_safety_score`) — the original demo heuristic
+   (time-of-day + a seeded-random incident penalty), used when the caller
+   only has place names, no coordinates. Kept as-is for backward
+   compatibility with any existing caller.
+2. Coordinate-based (`fetch_osrm_routes` + `sample_route_points`) — real
+   routing via the free, keyless OSRM public demo server, which returns
+   actual road geometry (and alternative routes, for Route Comparison).
+   The corridor is then sampled and scored against real risk-zone data
+   (audits + risk_alerts) by app.py's `_score_route_geometry`, since that
+   needs DB access this module doesn't have.
 
-To go live: plug in the Google Maps Directions API to get the actual route,
-and replace SIMULATED_INCIDENT_DATA with a real crowd-sourced /
-police-reported incident dataset keyed by area.
+Both external calls are best-effort: short timeout, narrow exception
+handling, and an explicit `None`/`[]` return on any failure so callers can
+fall back to the offline heuristic — the same "degrades gracefully instead
+of crashing" pattern used by utils/audio_classifier.py and utils/push.py.
+Note: the OSRM/Overpass public demo servers are free for light,
+non-commercial use and are rate-limited — fine for a hackathon demo, not a
+substitute for a paid routing provider in production.
 """
 
 import random
 from datetime import datetime
 
-# Simulated incident density per area name (demo data only)
+try:
+    import requests
+except ImportError:  # pragma: no cover - requests should always be present per requirements.txt
+    requests = None
+
+OSRM_BASE_URL = "https://router.project-osrm.org"
+OSRM_TIMEOUT_SECONDS = 5
+
+# Simulated incident density per area name (demo data only, text-only mode)
 SIMULATED_INCIDENT_DATA = {
     "default": 3,
 }
 
 
-def _time_of_day_penalty():
-    hour = datetime.now().hour
+def _time_of_day_penalty(at_hour=None):
+    hour = at_hour if at_hour is not None else datetime.now().hour
     if 22 <= hour or hour < 5:
         return 35  # late night, higher risk
     if 18 <= hour < 22:
@@ -28,33 +48,28 @@ def _time_of_day_penalty():
     return 5  # daytime
 
 
+def score_to_rating(score):
+    if score >= 75:
+        return "Safe", "green"
+    if score >= 45:
+        return "Caution", "orange"
+    return "High Risk", "red"
+
+
 def get_route_safety_score(origin, destination):
-    """
-    Returns a safety score and simple color-coded rating for a route.
-    In production this would call Google Maps Directions API for the
-    actual path, then score each segment using lighting/CCTV/crowd data.
-    """
+    """Text-only heuristic fallback — no coordinates available, so this is
+    necessarily approximate (repeatable per route-name via a string-seeded
+    RNG, not a real safety measurement)."""
     base_score = 100
     base_score -= _time_of_day_penalty()
 
-    # Simulated random incident variance seeded by route string so the
-    # same route gives a consistent (repeatable) score during a demo
     seed_value = sum(ord(c) for c in (origin + destination)) or 1
     rng = random.Random(seed_value)
     incident_penalty = rng.randint(5, 25)
     base_score -= incident_penalty
 
     score = max(0, min(100, base_score))
-
-    if score >= 75:
-        rating = "Safe"
-        color = "green"
-    elif score >= 45:
-        rating = "Caution"
-        color = "orange"
-    else:
-        rating = "High Risk"
-        color = "red"
+    rating, color = score_to_rating(score)
 
     return {
         "origin": origin,
@@ -62,5 +77,122 @@ def get_route_safety_score(origin, destination):
         "score": score,
         "rating": rating,
         "color": color,
-        "note": "Score based on time-of-day and simulated incident data (demo mode).",
+        "mode": "heuristic",
+        "note": "Approximate score based on time-of-day only — no coordinates were provided, so real route/risk-zone data couldn't be used.",
     }
+
+
+def fetch_osrm_routes(origin_lat, origin_lng, dest_lat, dest_lng, alternatives=False):
+    """Real road-network routing via OSRM's free public demo server.
+    Returns a list of route dicts: {distance_km, duration_min, geometry:
+    [[lat, lng], ...]}, most-direct first. Returns [] on any failure
+    (network, timeout, malformed response, no route found) so the caller
+    can fall back to a straight-line estimate."""
+    if requests is None:
+        return []
+    try:
+        url = (
+            f"{OSRM_BASE_URL}/route/v1/driving/"
+            f"{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
+        )
+        resp = requests.get(
+            url,
+            params={
+                "overview": "full",
+                "geometries": "geojson",
+                "alternatives": "true" if alternatives else "false",
+            },
+            timeout=OSRM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != "Ok":
+            return []
+
+        routes = []
+        for route in data.get("routes", []):
+            coords = route.get("geometry", {}).get("coordinates", [])  # [lng, lat] pairs
+            geometry = [[lat, lng] for lng, lat in coords]
+            if not geometry:
+                continue
+            routes.append({
+                "distance_km": round(route.get("distance", 0) / 1000, 2),
+                "duration_min": round(route.get("duration", 0) / 60, 1),
+                "geometry": geometry,
+            })
+        return routes
+    except Exception:
+        # Network error, timeout, rate-limited, malformed JSON, etc. — all
+        # treated the same: no real route data, caller falls back.
+        return []
+
+
+def sample_route_points(geometry, num_samples=6):
+    """Evenly-spaced sample points [[lat, lng], ...] along a route's
+    geometry, used to check the corridor against risk-zone data without
+    scoring every single vertex (which can be hundreds of points)."""
+    if not geometry:
+        return []
+    if len(geometry) <= num_samples:
+        return geometry
+    step = (len(geometry) - 1) / (num_samples - 1)
+    return [geometry[round(i * step)] for i in range(num_samples)]
+
+
+def derive_open_status(service_type, opening_hours_tag=None):
+    """Best-effort open/closed signal. Deliberately conservative: parsing
+    the full OSM opening_hours mini-language correctly (holidays, split
+    shifts, etc.) is its own small project, and guessing wrong in a safety
+    directory is worse than saying 'call to confirm'. So this only claims
+    24/7 when the source data actually says so (or for police/emergency
+    helplines, where that's true almost universally) — everything else
+    gets an honest 'hours vary' rather than a fabricated Open/Closed Now.
+    """
+    if opening_hours_tag and "24/7" in opening_hours_tag:
+        return {"status": "open_24_7", "label": "Open 24/7"}
+    if service_type in ("police", "helpline"):
+        return {"status": "open_24_7", "label": "Typically 24/7"}
+    if service_type == "hospital":
+        return {"status": "open_24_7", "label": "Emergency dept. typically 24/7"}
+    return {"status": "hours_vary", "label": "Hours vary — call to confirm"}
+
+
+def fetch_nearby_amenities_osm(lat, lng, amenity_types, radius_m=1500):
+    """Real nearby police/hospital/pharmacy data from OpenStreetMap via the
+    free Overpass API — no API key required. `amenity_types` is a list of
+    OSM `amenity=` tag values (e.g. ["police", "hospital", "pharmacy"]).
+    Returns [] on any failure so the caller can fall back to MOCK_SERVICES."""
+    if requests is None or not amenity_types:
+        return []
+    try:
+        amenity_filter = "".join(
+            f'node["amenity"="{a}"](around:{radius_m},{lat},{lng});' for a in amenity_types
+        )
+        query = f"[out:json][timeout:{OSRM_TIMEOUT_SECONDS}];({amenity_filter});out center 30;"
+        resp = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": query},
+            timeout=OSRM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        elements = resp.json().get("elements", [])
+
+        results = []
+        for el in elements:
+            tags = el.get("tags", {})
+            name = tags.get("name")
+            if not name:
+                continue  # skip unnamed nodes — not useful in a directory list
+            amenity_type = tags.get("amenity")
+            results.append({
+                "name": name,
+                "type": amenity_type,
+                "lat": el.get("lat"),
+                "lng": el.get("lon"),
+                "phone": tags.get("phone") or tags.get("contact:phone") or "N/A",
+                "source": "osm",
+                "open_status": derive_open_status(amenity_type, tags.get("opening_hours")),
+            })
+        return results
+    except Exception:
+        return []

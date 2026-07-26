@@ -27,8 +27,8 @@ from marshmallow import Schema, fields, validate, ValidationError, EXCLUDE
 # ---------------------------------------------------------------------------
 # Shared field building blocks
 # ---------------------------------------------------------------------------
-LATITUDE = fields.Float(validate=validate.Range(min=-90, max=90))
-LONGITUDE = fields.Float(validate=validate.Range(min=-180, max=180))
+LATITUDE = fields.Float(required=True, validate=validate.Range(min=-90, max=90))
+LONGITUDE = fields.Float(required=True, validate=validate.Range(min=-180, max=180))
 
 # Nullable variants — several existing endpoints tolerate missing/None
 # lat/lng (e.g. a checkin timeout has no location). allow_none lets the
@@ -104,6 +104,10 @@ class SOSSchema(Schema):
     latitude = LATITUDE_OPT
     longitude = LONGITUDE_OPT
     trigger_type = fields.Str(load_default="manual", validate=validate.Length(max=40))
+    accuracy_m = fields.Float(allow_none=True, load_default=None, validate=validate.Range(min=0, max=200000))
+    location_source = fields.Str(
+        load_default="gps", validate=validate.OneOf(["gps", "cached", "unavailable"])
+    )
 
 
 class LocationSchema(Schema):
@@ -128,6 +132,11 @@ class RouteSafetySchema(Schema):
 
     origin = fields.Str(load_default="", validate=validate.Length(max=300))
     destination = fields.Str(load_default="", validate=validate.Length(max=300))
+    origin_lat = LATITUDE_OPT
+    origin_lng = LONGITUDE_OPT
+    destination_lat = LATITUDE_OPT
+    destination_lng = LONGITUDE_OPT
+    compare_alternatives = fields.Bool(load_default=False)
 
 
 class CheckinStartSchema(Schema):
@@ -169,6 +178,38 @@ class GuardianShareSchema(Schema):
     longitude = LONGITUDE_OPT
 
 
+# ---------------------------------------------------------------------------
+# Journey Mode
+# ---------------------------------------------------------------------------
+class JourneyStartSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    destination_name = fields.Str(required=True, validate=validate.Length(min=1, max=200))
+    destination_lat = LATITUDE_OPT
+    destination_lng = LONGITUDE_OPT
+    origin_lat = LATITUDE_OPT
+    origin_lng = LONGITUDE_OPT
+    eta_minutes = fields.Int(required=True, validate=validate.Range(min=1, max=720))
+    # References contacts.id — ownership is checked in the route, not here.
+    guardian_contact_id = fields.Int(allow_none=True, load_default=None)
+
+
+class JourneyLocationSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    latitude = LATITUDE
+    longitude = LONGITUDE
+
+
+class JourneyExtendSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    extra_minutes = fields.Int(required=True, validate=validate.Range(min=1, max=240))
+
+
 class FeedPostSchema(Schema):
     class Meta:
         unknown = EXCLUDE
@@ -179,6 +220,22 @@ class FeedPostSchema(Schema):
         validate=validate.OneOf(["alert", "safe_spot", "incident"]),
     )
     area_name = _short_text(150)
+    latitude = LATITUDE_OPT
+    longitude = LONGITUDE_OPT
+
+
+class FeedCommentSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    message = fields.Str(required=True, validate=validate.Length(min=1, max=500))
+
+
+class AssistantChatSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    message = fields.Str(required=True, validate=validate.Length(min=1, max=1000))
     latitude = LATITUDE_OPT
     longitude = LONGITUDE_OPT
 

@@ -52,9 +52,17 @@ import logging
 from collections import defaultdict
 
 from utils.alerts import send_sos_alert
-from utils.route_safety import get_route_safety_score
+from utils.route_safety import (
+    get_route_safety_score,
+    fetch_osrm_routes,
+    sample_route_points,
+    score_to_rating,
+    fetch_nearby_amenities_osm,
+    derive_open_status,
+)
 from utils.distress_detector import check_distress
-from utils.safety_services import get_nearby_services
+from utils.safety_services import get_nearby_services, MOCK_SERVICES
+from utils.assistant import generate_reply as generate_assistant_reply
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
 from validators import (
@@ -71,6 +79,11 @@ from validators import (
     CheckLocationRiskSchema,
     GuardianShareSchema,
     FeedPostSchema,
+    FeedCommentSchema,
+    AssistantChatSchema,
+    JourneyStartSchema,
+    JourneyLocationSchema,
+    JourneyExtendSchema,
 )
 
 from config import get_config
@@ -95,9 +108,12 @@ app.config.from_object(get_config())
 
 DB_PATH = app.config["DATABASE_PATH"]  # kept for any code/tests referencing DB_PATH directly
 
-socketio = SocketIO(app, cors_allowed_origins=app.config["CORS_ORIGINS"])
-app.secret_key = os.environ.get("SECRET_KEY", "safeher-secret-key-change-in-production")
-
+# BUGFIX: this used to be `app.secret_key = os.environ.get("SECRET_KEY", "safeher-secret-key-change-in-production")`
+# here — a second, differently-worded fallback that silently overwrote the
+# SECRET_KEY already set by app.config.from_object(get_config()) above.
+# Harmless when SECRET_KEY *is* set in the environment (both read the same
+# value), but confusing and a footgun if someone "fixes" the duplication by
+# deleting the wrong one. config.py is now the single source of truth.
 # --- Secure session / cookie config ---
 app.config.update(
     SESSION_COOKIE_SECURE=IS_PRODUCTION,   # only sent over HTTPS in production
@@ -110,6 +126,11 @@ app.config.update(
 app.config["RATELIMIT_STORAGE_URI"] = os.environ.get("RATELIMIT_STORAGE_URI", "memory://")
 app.config["RATELIMIT_HEADERS_ENABLED"] = True  # adds Retry-After / X-RateLimit-* headers
 
+# BUGFIX: this used to be instantiated twice with two different,
+# differently-defaulted CORS sources (app.config["CORS_ORIGINS"], a dead
+# setting that defaulted to wildcard "*") — the first call's result was
+# silently discarded when the second overwrote `socketio`. One instance,
+# one explicit allowlist now.
 socketio = SocketIO(app, cors_allowed_origins=CORS_ALLOWED_ORIGINS)
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -443,6 +464,99 @@ def init_db():
             synced_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+
+        -- ================= JOURNEY MODE =================
+        -- A journey is a destination + ETA "escort" session: if the user
+        -- doesn't arrive (or extend/cancel) before the deadline, it behaves
+        -- like a missed check-in and auto-escalates to a full SOS.
+        CREATE TABLE IF NOT EXISTS journeys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            destination_name TEXT NOT NULL,
+            destination_lat REAL,
+            destination_lng REAL,
+            origin_lat REAL,
+            origin_lng REAL,
+            guardian_contact_id INTEGER,
+            eta_minutes INTEGER NOT NULL,
+            deadline TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            last_lat REAL,
+            last_lng REAL,
+            last_update_at TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(guardian_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS journey_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            journey_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            latitude REAL,
+            longitude REAL,
+            message TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(journey_id) REFERENCES journeys(id) ON DELETE CASCADE
+        );
+
+        -- Voice Distress Detection: Transcript History
+        CREATE TABLE IF NOT EXISTS voice_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            transcript TEXT NOT NULL,
+            distress_detected INTEGER NOT NULL,
+            confidence REAL,
+            matched_keywords TEXT,
+            emotion_label TEXT,
+            emotion_intensity REAL,
+            auto_triggered_sos INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        -- Community Feed: Likes, Helpful Votes, Comments
+        CREATE TABLE IF NOT EXISTS feed_likes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(post_id, user_id),
+            FOREIGN KEY(post_id) REFERENCES feed_posts(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS feed_helpful_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(post_id, user_id),
+            FOREIGN KEY(post_id) REFERENCES feed_posts(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS feed_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            user_id INTEGER,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(post_id) REFERENCES feed_posts(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        -- AI Assistant conversation history
+        CREATE TABLE IF NOT EXISTS assistant_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            message TEXT NOT NULL,
+            intent TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
         """
     )
     conn.commit()
@@ -489,6 +603,22 @@ def _login_rate_limit_key():
     except Exception:
         pass
     return f"{get_remote_address()}:{email}"
+
+
+def _user_rate_limit_key():
+    """Per-authenticated-user rate-limit key (falls back to IP for the rare
+    case a limiter check somehow runs before login_required rejects the
+    request). Used for authenticated, potentially-abusable endpoints
+    (SOS, journey start, feed posts) where per-IP limiting alone is too
+    coarse — e.g. NAT'd office wifi shouldn't throttle one person's abuse
+    of the endpoint against everyone else on that IP, and one person
+    shouldn't be able to spam contacts by rotating IPs."""
+    try:
+        if current_user.is_authenticated:
+            return f"user:{current_user.id}"
+    except Exception:
+        pass
+    return get_remote_address()
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -987,8 +1117,29 @@ def tracking_history():
 # ---------------------------------------------------------------------------
 # SOS (with WebSocket real-time notification)
 # ---------------------------------------------------------------------------
+def _format_sos_message(user_email, trigger_type, lat, lng, accuracy_m=None, location_source=None):
+    """BUGFIX: previously built the message as an f-string with raw
+    `{lat},{lng}` even when both were None (checkin timeouts, some
+    internal escalations), producing a broken, non-functional
+    `https://maps.google.com/?q=None,None` link sent straight to a
+    trusted contact in an emergency. Now degrades gracefully, and (for
+    manual triggers, where the browser can tell us) notes GPS accuracy or
+    that a cached/last-known location is being used instead of live GPS."""
+    if lat is None or lng is None:
+        location_part = "Location unavailable — GPS could not be acquired."
+    else:
+        location_part = f"Location: https://maps.google.com/?q={lat},{lng}"
+        if location_source == "cached":
+            location_part += " (last known location — GPS unavailable at time of alert)"
+        elif accuracy_m is not None:
+            location_part += f" (±{round(accuracy_m)}m accuracy)"
+
+    return f"SOS ALERT ({trigger_type}) - {user_email} needs help. {location_part}"
+
+
 @app.route("/api/sos", methods=["POST"])
 @login_required
+@limiter.limit("15 per hour", methods=["POST"], key_func=_user_rate_limit_key)
 @validate_json(SOSSchema)
 def trigger_sos():
     data = g.validated_data
@@ -999,9 +1150,9 @@ def trigger_sos():
     conn = get_db()
     contacts = conn.execute("SELECT * FROM contacts WHERE user_id = ?", (current_user.id,)).fetchall()
 
-    message = (
-        f"SOS ALERT ({trigger_type}) - {current_user.email} needs help. "
-        f"Location: https://maps.google.com/?q={lat},{lng}"
+    message = _format_sos_message(
+        current_user.email, trigger_type, lat, lng,
+        accuracy_m=data.get("accuracy_m"), location_source=data.get("location_source"),
     )
 
     delivery_results = send_sos_alert(contacts, message)
@@ -1020,12 +1171,18 @@ def trigger_sos():
     )
 
     # ===== FEATURE 4: WebSocket real-time notification =====
-    socketio.emit("sos_triggered", {
+    # SECURITY FIX: previously broadcast to a global "sos_room" every
+    # logged-in user was a member of. Now scoped to the triggering user's
+    # own devices plus anyone currently, authorizedly watching their live
+    # tracking (join_tracking already enforces is_accepted_linked_contact).
+    sos_payload = {
         "user_email": current_user.email,
         "location": {"latitude": lat, "longitude": lng},
         "message": message,
         "timestamp": datetime.utcnow().isoformat(),
-    }, room="sos_room")
+    }
+    socketio.emit("sos_triggered", sos_payload, room=f"user_{current_user.id}")
+    socketio.emit("sos_triggered", sos_payload, room=f"tracking_{current_user.id}")
 
     return jsonify(
         {
@@ -1052,26 +1209,68 @@ def list_alerts():
 # ---------------------------------------------------------------------------
 # FEATURE 1: Distress detection (transcript + ML fallback)
 # ---------------------------------------------------------------------------
+# In-memory per-user cooldown so a burst of continuous transcript analyses
+# (e.g. someone leaves "Start Listening" running) can't repeatedly
+# auto-trigger SOS every few seconds off the same ongoing distress —
+# one real trigger is enough; the DB alert history still shows every
+# analysis, just not every one becomes its own SOS.
+LAST_VOICE_AUTO_TRIGGER = {}  # user_id -> datetime
+VOICE_AUTO_TRIGGER_COOLDOWN_SECONDS = 90
+
+
 @app.route("/api/distress-check", methods=["POST"])
 @login_required
 @validate_json(DistressCheckSchema)
 def distress_check():
     """
-    FEATURE 1: REAL AI-BASED DISTRESS DETECTION
-    
-    Browser uses TensorFlow.js + YAMNet to detect audio distress.
-    This endpoint acts as keyword-match fallback if ML inference fails.
+    Transcript-based distress detection (utils/distress_detector.py) — a
+    keyword + lightweight-heuristic signal, independent from the raw-audio
+    YAMNet path in /api/audio-classify below (not a fallback for it).
     """
     data = g.validated_data
     transcript = data.get("transcript", "")
     result = check_distress(transcript)
-    
+
+    now = datetime.utcnow()
     if result.get("auto_trigger_sos"):
-        loc = data.get("location", {})
-        if loc.get("latitude") and loc.get("longitude"):
-            trigger_sos_internal(current_user.id, loc["latitude"], loc["longitude"], "audio_ml")
-    
+        last_trigger = LAST_VOICE_AUTO_TRIGGER.get(current_user.id)
+        if last_trigger and (now - last_trigger).total_seconds() < VOICE_AUTO_TRIGGER_COOLDOWN_SECONDS:
+            result["auto_trigger_sos"] = False
+            result["cooldown_active"] = True
+        else:
+            loc = data.get("location", {})
+            if loc.get("latitude") and loc.get("longitude"):
+                trigger_sos_internal(current_user.id, loc["latitude"], loc["longitude"], "audio_ml")
+                LAST_VOICE_AUTO_TRIGGER[current_user.id] = now
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO voice_analyses "
+        "(user_id, transcript, distress_detected, confidence, matched_keywords, emotion_label, emotion_intensity, auto_triggered_sos, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            current_user.id, transcript, int(result.get("distress_detected", False)),
+            result.get("confidence"), ",".join(result.get("matched", [])),
+            result.get("emotion", {}).get("label"), result.get("emotion", {}).get("intensity"),
+            int(bool(result.get("auto_trigger_sos"))), now.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
     return jsonify(result)
+
+
+@app.route("/api/distress-check/history", methods=["GET"])
+@login_required
+def distress_check_history():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM voice_analyses WHERE user_id = ? ORDER BY id DESC LIMIT 30",
+        (current_user.id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/audio-classify", methods=["POST"])
@@ -1129,10 +1328,7 @@ def trigger_sos_internal(user_id, lat, lng, trigger_type):
     contacts = conn.execute("SELECT * FROM contacts WHERE user_id = ?", (user_id,)).fetchall()
     
     user_email = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()["email"]
-    message = (
-        f"SOS ALERT ({trigger_type}) - {user_email} needs help. "
-        f"Location: https://maps.google.com/?q={lat},{lng}"
-    )
+    message = _format_sos_message(user_email, trigger_type, lat, lng)
     
     send_sos_alert(contacts, message)
     
@@ -1153,6 +1349,38 @@ def trigger_sos_internal(user_id, lat, lng, trigger_type):
 # ---------------------------------------------------------------------------
 # Route safety scoring
 # ---------------------------------------------------------------------------
+def _score_route_geometry(conn, geometry, label):
+    """Samples a route's geometry (or a synthetic 2-point straight line) at
+    a handful of points, scores each with the real ML risk predictor, and
+    aggregates into one route-level safety score. `risk_zones_crossed`
+    counts how many sampled points fell within 500m of a known low-safety
+    audit — a concrete, explainable number to show alongside the score."""
+    samples = sample_route_points(geometry, num_samples=6)
+    if not samples:
+        return None
+
+    risk_scores = []
+    zones_crossed = 0
+    for lat, lng in samples:
+        prediction, nearest_threat, _ = _predict_location_risk(conn, lat, lng)
+        risk_scores.append(prediction["risk_score"])
+        if nearest_threat is not None:
+            zones_crossed += 1
+
+    avg_risk = sum(risk_scores) / len(risk_scores)
+    score = max(0, min(100, round(100 - avg_risk)))
+    rating, color = score_to_rating(score)
+
+    return {
+        "label": label,
+        "score": score,
+        "rating": rating,
+        "color": color,
+        "risk_zones_crossed": zones_crossed,
+        "geometry": geometry,
+    }
+
+
 @app.route("/api/route-safety", methods=["POST"])
 @login_required
 @validate_json(RouteSafetySchema)
@@ -1160,8 +1388,118 @@ def route_safety():
     data = g.validated_data
     origin = data.get("origin", "")
     destination = data.get("destination", "")
-    result = get_route_safety_score(origin, destination)
-    return jsonify(result)
+    o_lat, o_lng = data.get("origin_lat"), data.get("origin_lng")
+    d_lat, d_lng = data.get("destination_lat"), data.get("destination_lng")
+
+    if o_lat is None or o_lng is None or d_lat is None or d_lng is None:
+        # No coordinates given at all — original text-only heuristic,
+        # unchanged, for backward compatibility.
+        result = get_route_safety_score(origin, destination)
+        result["routes"] = None
+        return jsonify(result)
+
+    conn = get_db()
+
+    osrm_routes = fetch_osrm_routes(
+        o_lat, o_lng, d_lat, d_lng, alternatives=data.get("compare_alternatives", False)
+    )
+
+    if osrm_routes:
+        labels = ["Fastest Route", "Alternative Route"]
+        scored_routes = []
+        for i, route in enumerate(osrm_routes[:2]):
+            scored = _score_route_geometry(conn, route["geometry"], labels[i] if i < len(labels) else f"Route {i+1}")
+            if scored:
+                scored.update({"distance_km": route["distance_km"], "duration_min": route["duration_min"]})
+                scored_routes.append(scored)
+        mode = "osrm"
+    else:
+        # OSRM unreachable — fall back to a straight-line estimate so the
+        # feature still works offline, clearly labeled as approximate.
+        straight_line_geometry = [[o_lat, o_lng], [d_lat, d_lng]]
+        scored = _score_route_geometry(conn, straight_line_geometry, "Direct (estimated)")
+        if scored:
+            scored.update({
+                "distance_km": round(haversine_distance(o_lat, o_lng, d_lat, d_lng), 2),
+                "duration_min": None,
+            })
+        scored_routes = [scored] if scored else []
+        mode = "straight_line_estimate"
+
+    conn.close()
+
+    if not scored_routes:
+        result = get_route_safety_score(origin, destination)
+        result["routes"] = None
+        return jsonify(result)
+
+    best = max(scored_routes, key=lambda r: r["score"])
+    return jsonify({
+        "origin": origin, "destination": destination,
+        "mode": mode,
+        "score": best["score"], "rating": best["rating"], "color": best["color"],
+        "distance": best["distance_km"], "estimated_score": best["score"],
+        "routes": scored_routes,
+        "note": (
+            "Real road routing + risk-zone scoring." if mode == "osrm"
+            else "Routing service unavailable — showing a straight-line estimate."
+        ),
+    })
+
+
+@app.route("/api/risk-zones", methods=["GET"])
+@login_required
+def risk_zones():
+    """Safety Map overlay data: known low-safety audit clusters + active
+    proactive risk_alerts near a point, plus a real (not mocked) crowd
+    density count, for drawing on the Leaflet map as radius circles."""
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    radius_km = min(max(request.args.get("radius_km", default=3.0, type=float), 0.5), 15)
+
+    if lat is None or lng is None:
+        return jsonify({"error": "lat/lng are required"}), 400
+
+    conn = get_db()
+
+    box = radius_km / 111.0  # rough degrees-per-km at most latitudes
+    candidate_audits = conn.execute(
+        "SELECT * FROM audits WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND overall_score < 60",
+        (lat - box, lat + box, lng - box, lng + box),
+    ).fetchall()
+
+    zones = []
+    for a in candidate_audits:
+        dist = haversine_distance(lat, lng, a["latitude"], a["longitude"])
+        if dist <= radius_km:
+            severity = "high" if a["overall_score"] < 35 else "medium"
+            zones.append({
+                "source": "audit", "severity": severity,
+                "latitude": a["latitude"], "longitude": a["longitude"],
+                "radius_m": 250, "label": a["area_name"] or "Unnamed area",
+                "score": a["overall_score"], "lighting": a["lighting"],
+            })
+
+    candidate_risk_alerts = conn.execute(
+        "SELECT * FROM risk_alerts WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND dismissed = 0",
+        (lat - box, lat + box, lng - box, lng + box),
+    ).fetchall()
+    for r in candidate_risk_alerts:
+        if r["latitude"] is None:
+            continue
+        dist = haversine_distance(lat, lng, r["latitude"], r["longitude"])
+        if dist <= radius_km:
+            zones.append({
+                "source": "risk_alert", "severity": "high" if (r["risk_score"] or 0) > 65 else "medium",
+                "latitude": r["latitude"], "longitude": r["longitude"],
+                "radius_m": 200, "label": r["nearby_low_score_area"] or "Reported risk area",
+                "score": round(100 - (r["risk_score"] or 0)),
+            })
+
+    crowd_count = _count_active_users_nearby(conn, lat, lng, radius_km=radius_km)
+    conn.close()
+
+    return jsonify({"zones": zones, "crowd_density": crowd_count, "center": {"lat": lat, "lng": lng}, "radius_km": radius_km})
 
 
 # ---------------------------------------------------------------------------
@@ -1222,6 +1560,405 @@ def checkin_status(checkin_id):
     
     conn.close()
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# JOURNEY MODE — destination + ETA escort sessions.
+#
+# Lifecycle: active -> arrived | cancelled | missed
+# "missed" means the deadline passed without an extend/arrive/cancel call,
+# and behaves exactly like a missed check-in: it auto-escalates to a full
+# SOS (same trigger_sos_internal() used by /api/checkin/<id>/status and the
+# audio-ML auto-trigger paths), so guardians get the same alert either way.
+# ---------------------------------------------------------------------------
+def _log_journey_event(conn, journey_id, event_type, lat=None, lng=None, message=None):
+    conn.execute(
+        "INSERT INTO journey_events (journey_id, event_type, latitude, longitude, message, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (journey_id, event_type, lat, lng, message, datetime.utcnow().isoformat()),
+    )
+
+
+def _journey_progress(journey):
+    """Rough progress indicators derived from elapsed time and (if we have
+    both origin and last-known point) distance closed toward the
+    destination. Either signal can be missing (e.g. no destination pin was
+    dropped), so the frontend falls back gracefully."""
+    started = datetime.fromisoformat(journey["started_at"])
+    deadline = datetime.fromisoformat(journey["deadline"])
+    now = datetime.utcnow()
+    total_seconds = max((deadline - started).total_seconds(), 1)
+    elapsed_seconds = (now - started).total_seconds()
+    time_progress_pct = max(0, min(100, round(elapsed_seconds / total_seconds * 100)))
+    remaining_seconds = max(0, int((deadline - now).total_seconds()))
+
+    distance_remaining_km = None
+    if (
+        journey["destination_lat"] is not None
+        and journey["destination_lng"] is not None
+        and journey["last_lat"] is not None
+        and journey["last_lng"] is not None
+    ):
+        distance_remaining_km = round(
+            haversine_distance(
+                journey["last_lat"], journey["last_lng"],
+                journey["destination_lat"], journey["destination_lng"],
+            ),
+            3,
+        )
+
+    return {
+        "time_progress_pct": time_progress_pct,
+        "remaining_seconds": remaining_seconds,
+        "distance_remaining_km": distance_remaining_km,
+    }
+
+
+def _journey_to_dict(journey):
+    result = dict(journey)
+    result.update(_journey_progress(journey))
+    return result
+
+
+def _check_journey_expiry(conn, journey_row):
+    """Shared expiry check used by every read path (active/status/timeline)
+    so a stale-but-still-'active' row gets flipped to 'missed' and
+    escalated to SOS the moment anyone asks about it — not just on a
+    dedicated poll endpoint."""
+    if journey_row["status"] != "active":
+        return journey_row
+
+    deadline = datetime.fromisoformat(journey_row["deadline"])
+    if datetime.utcnow() <= deadline:
+        return journey_row
+
+    conn.execute(
+        "UPDATE journeys SET status = 'missed', ended_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), journey_row["id"]),
+    )
+    _log_journey_event(
+        conn, journey_row["id"], "missed_checkin",
+        lat=journey_row["last_lat"], lng=journey_row["last_lng"],
+        message=f"No check-in before ETA for '{journey_row['destination_name']}' — auto-alerting.",
+    )
+    conn.commit()
+
+    trigger_sos_internal(
+        journey_row["user_id"],
+        journey_row["last_lat"] or journey_row["origin_lat"],
+        journey_row["last_lng"] or journey_row["origin_lng"],
+        "journey_missed_checkin",
+    )
+    _log_journey_event(conn, journey_row["id"], "auto_alert", message="Guardians and trusted contacts notified.")
+    conn.commit()
+
+    journey_missed_payload = {
+        "journey_id": journey_row["id"],
+        "destination_name": journey_row["destination_name"],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    socketio.emit("journey_missed", journey_missed_payload, room=f"user_{journey_row['user_id']}")
+    socketio.emit("journey_missed", journey_missed_payload, room=f"tracking_{journey_row['user_id']}")
+
+    return conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_row["id"],)).fetchone()
+
+
+def _get_owned_journey(conn, journey_id, user_id):
+    row = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    if not row or row["user_id"] != user_id:
+        return None
+    return row
+
+
+@app.route("/api/journey/start", methods=["POST"])
+@login_required
+@limiter.limit("20 per hour", methods=["POST"], key_func=_user_rate_limit_key)
+@validate_json(JourneyStartSchema)
+def journey_start():
+    data = g.validated_data
+    conn = get_db()
+
+    guardian_contact_id = data.get("guardian_contact_id")
+    guardian_contact = None
+    if guardian_contact_id is not None:
+        guardian_contact = conn.execute(
+            "SELECT * FROM contacts WHERE id = ? AND user_id = ?",
+            (guardian_contact_id, current_user.id),
+        ).fetchone()
+        if not guardian_contact:
+            conn.close()
+            return jsonify({"error": "guardian contact not found"}), 404
+
+    # Only one active journey at a time — close out any stale one instead
+    # of silently orphaning it.
+    stale = conn.execute(
+        "SELECT id FROM journeys WHERE user_id = ? AND status = 'active'", (current_user.id,)
+    ).fetchall()
+    for row in stale:
+        conn.execute(
+            "UPDATE journeys SET status = 'cancelled', ended_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), row["id"]),
+        )
+        _log_journey_event(conn, row["id"], "cancelled", message="Superseded by a new journey.")
+
+    now = datetime.utcnow()
+    deadline = now + timedelta(minutes=data["eta_minutes"])
+    cur = conn.execute(
+        """INSERT INTO journeys
+           (user_id, destination_name, destination_lat, destination_lng, origin_lat, origin_lng,
+            guardian_contact_id, eta_minutes, deadline, status, last_lat, last_lng, last_update_at, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+        (
+            current_user.id, data["destination_name"].strip(),
+            data.get("destination_lat"), data.get("destination_lng"),
+            data.get("origin_lat"), data.get("origin_lng"),
+            guardian_contact_id, data["eta_minutes"], deadline.isoformat(),
+            data.get("origin_lat"), data.get("origin_lng"), now.isoformat(), now.isoformat(),
+        ),
+    )
+    journey_id = cur.lastrowid
+    _log_journey_event(
+        conn, journey_id, "started",
+        lat=data.get("origin_lat"), lng=data.get("origin_lng"),
+        message=f"Journey started to '{data['destination_name']}', ETA {data['eta_minutes']} min.",
+    )
+    conn.commit()
+
+    if guardian_contact is not None:
+        send_sos_alert(
+            [guardian_contact],
+            f"{current_user.email} started a journey to {data['destination_name']} "
+            f"(ETA {data['eta_minutes']} min) and asked you to keep an eye on it.",
+        )
+
+    journey = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    conn.close()
+
+    socketio.emit("journey_started", {
+        "journey_id": journey_id,
+        "destination_name": data["destination_name"],
+        "timestamp": now.isoformat(),
+    }, room=f"user_{current_user.id}")
+
+    logger.info(
+        "Journey started: user=%s journey_id=%s eta_minutes=%s guardian=%s",
+        hash_identifier(current_user.email), journey_id, data["eta_minutes"], guardian_contact_id is not None,
+    )
+
+    return jsonify(_journey_to_dict(journey)), 201
+
+
+@app.route("/api/journey/active", methods=["GET"])
+@login_required
+def journey_active():
+    conn = get_db()
+    journey = conn.execute(
+        "SELECT * FROM journeys WHERE user_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+        (current_user.id,),
+    ).fetchone()
+    if not journey:
+        conn.close()
+        return jsonify(None)
+
+    journey = _check_journey_expiry(conn, journey)
+    conn.commit()
+    conn.close()
+    return jsonify(_journey_to_dict(journey))
+
+
+@app.route("/api/journey/<int:journey_id>/location", methods=["POST"])
+@login_required
+@validate_json(JourneyLocationSchema)
+def journey_update_location(journey_id):
+    data = g.validated_data
+    conn = get_db()
+    journey = _get_owned_journey(conn, journey_id, current_user.id)
+    if not journey:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    journey = _check_journey_expiry(conn, journey)
+    if journey["status"] != "active":
+        conn.commit()
+        conn.close()
+        return jsonify(_journey_to_dict(journey))
+
+    lat, lng = data["latitude"], data["longitude"]
+    conn.execute(
+        "UPDATE journeys SET last_lat = ?, last_lng = ?, last_update_at = ? WHERE id = ?",
+        (lat, lng, datetime.utcnow().isoformat(), journey_id),
+    )
+    _log_journey_event(conn, journey_id, "location_update", lat=lat, lng=lng)
+
+    # Auto-detect arrival if we know the destination coordinates and the
+    # user is now within ~75m of them.
+    arrived = False
+    if journey["destination_lat"] is not None and journey["destination_lng"] is not None:
+        distance_km = haversine_distance(lat, lng, journey["destination_lat"], journey["destination_lng"])
+        if distance_km <= 0.075:
+            arrived = True
+            conn.execute(
+                "UPDATE journeys SET status = 'arrived', ended_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), journey_id),
+            )
+            _log_journey_event(conn, journey_id, "arrived", lat=lat, lng=lng, message="Reached destination.")
+
+    conn.commit()
+    journey = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    conn.close()
+
+    if arrived:
+        socketio.emit("journey_arrived", {
+            "journey_id": journey_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }, room=f"user_{current_user.id}")
+
+    return jsonify(_journey_to_dict(journey))
+
+
+@app.route("/api/journey/<int:journey_id>/extend", methods=["POST"])
+@login_required
+@validate_json(JourneyExtendSchema)
+def journey_extend(journey_id):
+    data = g.validated_data
+    conn = get_db()
+    journey = _get_owned_journey(conn, journey_id, current_user.id)
+    if not journey:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    journey = _check_journey_expiry(conn, journey)
+    if journey["status"] != "active":
+        conn.commit()
+        conn.close()
+        return jsonify({"error": f"journey is already {journey['status']}"}), 409
+
+    current_deadline = datetime.fromisoformat(journey["deadline"])
+    base = max(current_deadline, datetime.utcnow())
+    new_deadline = base + timedelta(minutes=data["extra_minutes"])
+    conn.execute("UPDATE journeys SET deadline = ? WHERE id = ?", (new_deadline.isoformat(), journey_id))
+    _log_journey_event(
+        conn, journey_id, "extended",
+        message=f"Check-in extended by {data['extra_minutes']} minutes.",
+    )
+    conn.commit()
+    journey = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    conn.close()
+    return jsonify(_journey_to_dict(journey))
+
+
+@app.route("/api/journey/<int:journey_id>/arrived", methods=["POST"])
+@login_required
+def journey_arrived(journey_id):
+    conn = get_db()
+    journey = _get_owned_journey(conn, journey_id, current_user.id)
+    if not journey:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    journey = _check_journey_expiry(conn, journey)
+    if journey["status"] != "active":
+        conn.commit()
+        conn.close()
+        return jsonify({"error": f"journey is already {journey['status']}"}), 409
+
+    conn.execute(
+        "UPDATE journeys SET status = 'arrived', ended_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), journey_id),
+    )
+    _log_journey_event(conn, journey_id, "arrived", message="Marked as arrived by user.")
+    conn.commit()
+    journey = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    conn.close()
+    return jsonify(_journey_to_dict(journey))
+
+
+@app.route("/api/journey/<int:journey_id>/cancel", methods=["POST"])
+@login_required
+def journey_cancel(journey_id):
+    conn = get_db()
+    journey = _get_owned_journey(conn, journey_id, current_user.id)
+    if not journey:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    if journey["status"] != "active":
+        conn.close()
+        return jsonify({"error": f"journey is already {journey['status']}"}), 409
+
+    conn.execute(
+        "UPDATE journeys SET status = 'cancelled', ended_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), journey_id),
+    )
+    _log_journey_event(conn, journey_id, "cancelled", message="Cancelled by user.")
+    conn.commit()
+    journey = conn.execute("SELECT * FROM journeys WHERE id = ?", (journey_id,)).fetchone()
+    conn.close()
+    return jsonify(_journey_to_dict(journey))
+
+
+@app.route("/api/journey/<int:journey_id>/timeline", methods=["GET"])
+@login_required
+def journey_timeline(journey_id):
+    conn = get_db()
+    journey = _get_owned_journey(conn, journey_id, current_user.id)
+    if not journey:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    rows = conn.execute(
+        "SELECT * FROM journey_events WHERE journey_id = ? ORDER BY id ASC",
+        (journey_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/journey/history", methods=["GET"])
+@login_required
+def journey_history():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM journeys WHERE user_id = ? ORDER BY id DESC LIMIT 30",
+        (current_user.id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([_journey_to_dict(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
+# Safety score — dashboard summary widget, backed by the same ML risk
+# predictor used for /api/check-location-risk (read-only, nothing persisted).
+# ---------------------------------------------------------------------------
+@app.route("/api/safety-score", methods=["GET"])
+@login_required
+def safety_score():
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+
+    if lat is None or lng is None:
+        return jsonify({"score": None, "label": "Unknown", "engine": "none", "reason": "location unavailable"})
+
+    conn = get_db()
+    prediction, nearest_threat, _ = _predict_location_risk(conn, lat, lng)
+    conn.close()
+
+    score = max(0, min(100, round(100 - prediction["risk_score"])))
+    if score >= 80:
+        label = "Safe"
+    elif score >= 55:
+        label = "Caution"
+    else:
+        label = "High risk"
+
+    return jsonify({
+        "score": score,
+        "label": label,
+        "confidence": prediction["confidence"],
+        "engine": prediction["engine"],
+        "factors": prediction["factors"],
+        "nearby_area": nearest_threat["area_name"] if nearest_threat else None,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +2092,23 @@ def check_location_risk():
     })
 
 
+def _count_active_users_nearby(conn, lat, lng, radius_km=0.5):
+    """Real (not mocked) crowd-density signal: how many other users have an
+    active guardian-share within the last hour, physically close to this
+    point. Same signal the ML risk predictor already uses internally
+    (as `nearby_user_count`) — extracted here so the Safety Map's crowd
+    density feature and the risk model stay consistent with each other."""
+    one_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    active_shares = conn.execute(
+        "SELECT latitude, longitude FROM guardian_shares WHERE active = 1 AND updated_at > ?",
+        (one_hour_ago,),
+    ).fetchall()
+    return sum(
+        1 for s in active_shares
+        if s["latitude"] is not None and haversine_distance(lat, lng, s["latitude"], s["longitude"]) <= radius_km
+    )
+
+
 def _predict_location_risk(conn, lat, lng, user_id_for_density=None):
     """Shared helper: builds ML features from the DB and runs the risk
     predictor. Returns (prediction_dict, nearest_low_score_audit_or_None, distance_km)."""
@@ -1376,15 +2130,7 @@ def _predict_location_risk(conn, lat, lng, user_id_for_density=None):
             threat_distance = dist
             nearest_threat = audit
 
-    one_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
-    active_shares = conn.execute(
-        "SELECT latitude, longitude FROM guardian_shares WHERE active = 1 AND updated_at > ?",
-        (one_hour_ago,),
-    ).fetchall()
-    user_density = sum(
-        1 for s in active_shares
-        if s["latitude"] is not None and haversine_distance(lat, lng, s["latitude"], s["longitude"]) <= 0.5
-    )
+    user_density = _count_active_users_nearby(conn, lat, lng, radius_km=0.5)
 
     recent_alert = conn.execute(
         "SELECT created_at FROM alerts WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? "
@@ -1419,14 +2165,58 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 # ---------------------------------------------------------------------------
 # Nearby safety services directory
 # ---------------------------------------------------------------------------
+OSM_AMENITY_MAP = {"police": "police", "hospital": "hospital", "pharmacy": "pharmacy"}
+
+
+def _lookup_nearby_services(lat, lng, service_type=None):
+    """Shared by /api/nearby-services and the AI Assistant's nearby_help
+    intent, so both give consistent, real answers instead of the
+    assistant having its own separate (and potentially inconsistent)
+    lookup path."""
+    osm_results = []
+    if lat is not None and lng is not None and (service_type is None or service_type in OSM_AMENITY_MAP):
+        amenity_types = [OSM_AMENITY_MAP[service_type]] if service_type in OSM_AMENITY_MAP else list(OSM_AMENITY_MAP.values())
+        osm_results = fetch_nearby_amenities_osm(lat, lng, amenity_types)
+
+    if osm_results:
+        source = "osm"
+        for r in osm_results:
+            r["distance_km"] = round(haversine_distance(lat, lng, r["lat"], r["lng"]), 2)
+        results = osm_results
+    else:
+        # OSM unreachable, rate-limited, or returned nothing — fall back to
+        # the full offline mock directory (police/hospital/pharmacy/
+        # helpline all included, already filtered by service_type), not
+        # just the pieces OSM doesn't cover.
+        source = "mock"
+        results = get_nearby_services(lat, lng, service_type=service_type)
+
+    # Helplines aren't a queryable OSM amenity tag, so if OSM *did* succeed
+    # they still need to be folded in separately from the local directory.
+    if source == "osm" and service_type is None:
+        results = results + [
+            {
+                **s,
+                "distance_km": round(haversine_distance(lat, lng, s["lat"], s["lng"]), 2),
+                "source": "directory",
+                "open_status": derive_open_status(s["type"]),
+            }
+            for s in MOCK_SERVICES
+            if s["type"] == "helpline"
+        ]
+
+    results.sort(key=lambda x: x["distance_km"] if x.get("distance_km") is not None else 999999)
+    return results[:20], source
+
+
 @app.route("/api/nearby-services", methods=["GET"])
 @login_required
 def nearby_services():
     lat = request.args.get("lat", type=float)
     lng = request.args.get("lng", type=float)
     service_type = request.args.get("type") or None
-    results = get_nearby_services(lat, lng, service_type=service_type)
-    return jsonify(results)
+    results, source = _lookup_nearby_services(lat, lng, service_type)
+    return jsonify({"results": results, "source": source})
 
 
 # ---------------------------------------------------------------------------
@@ -1576,15 +2366,79 @@ def tracking_stop():
     return jsonify({"status": "tracking_stopped"})
 
 
+@app.route("/api/tracking/live-history", methods=["GET"])
+@login_required
+def tracking_live_history():
+    """BUGFIX: this was previously dead code — an orphaned, un-routed
+    fragment left sitting after `tracking_stop()`'s `return` (never
+    executed, no @app.route decorator). Restored as a real endpoint:
+    the breadcrumb trail from `location_history`, authorized the same
+    way as `/api/tracking/history` (self, or an accepted linked contact)."""
+    target_user_id = request.args.get("user_id", type=int) or current_user.id
 
     conn = get_db()
+    if not is_accepted_linked_contact(conn, target_user_id, current_user.id):
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
     rows = conn.execute(
         "SELECT latitude, longitude, timestamp FROM location_history "
         "WHERE user_id = ? ORDER BY id DESC LIMIT 50",
-        (current_user.id,),
+        (target_user_id,),
     ).fetchall()
     conn.close()
     return jsonify(list(reversed([dict(r) for r in rows])))
+
+
+@app.route("/api/guardian/watch/<int:user_id>/status", methods=["GET"])
+@login_required
+def guardian_watch_status(user_id):
+    """Guardian Dashboard snapshot for a Bubble member you're authorized to
+    watch: last known location + when, a live battery reading if their
+    device has reported one recently, a derived connection status, and
+    their active Journey (if any) so a guardian can see progress without
+    switching accounts."""
+    conn = get_db()
+    if not is_accepted_linked_contact(conn, user_id, current_user.id):
+        conn.close()
+        return jsonify({"error": "unauthorized"}), 403
+
+    last_location = conn.execute(
+        "SELECT latitude, longitude, timestamp FROM location_history WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+
+    active_journey = conn.execute(
+        "SELECT * FROM journeys WHERE user_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+
+    battery_state = DEVICE_BATTERY_STATE.get(user_id)
+
+    last_update_iso = last_location["timestamp"] if last_location else None
+    connection_status = "never_connected"
+    if last_update_iso:
+        seconds_since = (datetime.utcnow() - datetime.fromisoformat(last_update_iso)).total_seconds()
+        if seconds_since < 30:
+            connection_status = "live"
+        elif seconds_since < 180:
+            connection_status = "recent"
+        else:
+            connection_status = "stale"
+
+    journey_summary = None
+    if active_journey:
+        journey_summary = _journey_to_dict(active_journey)
+
+    return jsonify({
+        "user_id": user_id,
+        "last_location": dict(last_location) if last_location else None,
+        "connection_status": connection_status,
+        "battery_level": battery_state["battery_level"] if battery_state else None,
+        "battery_updated_at": battery_state["updated_at"] if battery_state else None,
+        "active_journey": journey_summary,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1593,14 +2447,85 @@ def tracking_stop():
 @app.route("/api/feed", methods=["GET"])
 @login_required
 def list_feed():
+    """Community Feed listing with search, category filtering, and a
+    'trending' sort (engagement-weighted, recency-decayed) alongside the
+    default recency sort. Each post includes like/helpful/comment counts
+    and whether the current user has already liked/voted, so the
+    frontend doesn't need a separate round-trip per post."""
+    search = (request.args.get("q") or "").strip()
+    post_type = request.args.get("post_type") or None
+    sort = request.args.get("sort", "recent")
+
+    query = """
+        SELECT fp.*,
+               (SELECT COUNT(*) FROM feed_likes fl WHERE fl.post_id = fp.id) AS like_count,
+               (SELECT COUNT(*) FROM feed_helpful_votes fh WHERE fh.post_id = fp.id) AS helpful_count,
+               (SELECT COUNT(*) FROM feed_comments fc WHERE fc.post_id = fp.id) AS comment_count,
+               (SELECT COUNT(*) FROM feed_likes fl2 WHERE fl2.post_id = fp.id AND fl2.user_id = ?) AS user_has_liked,
+               (SELECT COUNT(*) FROM feed_helpful_votes fh2 WHERE fh2.post_id = fp.id AND fh2.user_id = ?) AS user_has_voted_helpful
+        FROM feed_posts fp
+        WHERE 1=1
+    """
+    params = [current_user.id, current_user.id]
+
+    if post_type:
+        query += " AND fp.post_type = ?"
+        params.append(post_type)
+    if search:
+        query += " AND (fp.message LIKE ? OR fp.area_name LIKE ?)"
+        like_term = f"%{search}%"
+        params.extend([like_term, like_term])
+
+    query += " ORDER BY fp.id DESC LIMIT 150"
+
     conn = get_db()
-    rows = conn.execute("SELECT * FROM feed_posts ORDER BY id DESC LIMIT 100").fetchall()
+    rows = [dict(r) for r in conn.execute(query, params).fetchall()]
     conn.close()
-    return jsonify([dict(r) for r in rows])
+
+    for r in rows:
+        r["user_has_liked"] = bool(r["user_has_liked"])
+        r["user_has_voted_helpful"] = bool(r["user_has_voted_helpful"])
+
+    if sort == "trending":
+        # Engagement-weighted, with a recency decay so a hot post from
+        # last week doesn't permanently outrank today's alerts.
+        now = datetime.utcnow()
+        def trending_score(r):
+            age_hours = max(1, (now - datetime.fromisoformat(r["created_at"])).total_seconds() / 3600)
+            engagement = r["like_count"] + 2 * r["helpful_count"] + r["comment_count"]
+            return engagement / (age_hours ** 0.6)
+        rows.sort(key=trending_score, reverse=True)
+
+    return jsonify(rows[:100])
+
+
+@app.route("/api/feed/trending", methods=["GET"])
+@login_required
+def feed_trending():
+    """Compact 'Trending Alerts' strip: top engagement in the last 48h."""
+    cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT fp.*,
+               (SELECT COUNT(*) FROM feed_likes fl WHERE fl.post_id = fp.id) AS like_count,
+               (SELECT COUNT(*) FROM feed_helpful_votes fh WHERE fh.post_id = fp.id) AS helpful_count,
+               (SELECT COUNT(*) FROM feed_comments fc WHERE fc.post_id = fp.id) AS comment_count
+        FROM feed_posts fp
+        WHERE fp.created_at > ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+
+    rows = [dict(r) for r in rows]
+    rows.sort(key=lambda r: r["like_count"] + 2 * r["helpful_count"] + r["comment_count"], reverse=True)
+    return jsonify(rows[:5])
 
 
 @app.route("/api/feed", methods=["POST"])
 @login_required
+@limiter.limit("20 per hour", methods=["POST"], key_func=_user_rate_limit_key)
 @validate_json(FeedPostSchema)
 def add_feed_post():
     data = g.validated_data
@@ -1625,6 +2550,141 @@ def add_feed_post():
     return jsonify({"status": "posted"}), 201
 
 
+def _toggle_reaction(table, post_id):
+    """Shared toggle logic for likes/helpful-votes: insert if absent,
+    remove if present (a second tap un-likes/un-votes, matching every
+    mainstream social feed's UX)."""
+    conn = get_db()
+    post_exists = conn.execute("SELECT 1 FROM feed_posts WHERE id = ?", (post_id,)).fetchone()
+    if not post_exists:
+        conn.close()
+        return None
+
+    existing = conn.execute(
+        f"SELECT id FROM {table} WHERE post_id = ? AND user_id = ?", (post_id, current_user.id)
+    ).fetchone()
+    if existing:
+        conn.execute(f"DELETE FROM {table} WHERE id = ?", (existing["id"],))
+        active = False
+    else:
+        conn.execute(
+            f"INSERT INTO {table} (post_id, user_id, created_at) VALUES (?, ?, ?)",
+            (post_id, current_user.id, datetime.utcnow().isoformat()),
+        )
+        active = True
+    conn.commit()
+    count = conn.execute(f"SELECT COUNT(*) as c FROM {table} WHERE post_id = ?", (post_id,)).fetchone()["c"]
+    conn.close()
+    return active, count
+
+
+@app.route("/api/feed/<int:post_id>/like", methods=["POST"])
+@login_required
+def feed_like(post_id):
+    result = _toggle_reaction("feed_likes", post_id)
+    if result is None:
+        return jsonify({"error": "post not found"}), 404
+    active, count = result
+    return jsonify({"liked": active, "like_count": count})
+
+
+@app.route("/api/feed/<int:post_id>/helpful", methods=["POST"])
+@login_required
+def feed_helpful(post_id):
+    result = _toggle_reaction("feed_helpful_votes", post_id)
+    if result is None:
+        return jsonify({"error": "post not found"}), 404
+    active, count = result
+    return jsonify({"helpful": active, "helpful_count": count})
+
+
+@app.route("/api/feed/<int:post_id>/comments", methods=["GET"])
+@login_required
+def feed_list_comments(post_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT fc.*, u.email as user_email FROM feed_comments fc "
+        "LEFT JOIN users u ON u.id = fc.user_id WHERE fc.post_id = ? ORDER BY fc.id ASC",
+        (post_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/feed/<int:post_id>/comments", methods=["POST"])
+@login_required
+@limiter.limit("30 per hour", methods=["POST"], key_func=_user_rate_limit_key)
+@validate_json(FeedCommentSchema)
+def feed_add_comment(post_id):
+    conn = get_db()
+    post_exists = conn.execute("SELECT 1 FROM feed_posts WHERE id = ?", (post_id,)).fetchone()
+    if not post_exists:
+        conn.close()
+        return jsonify({"error": "post not found"}), 404
+
+    message = g.validated_data["message"].strip()
+    conn.execute(
+        "INSERT INTO feed_comments (post_id, user_id, message, created_at) VALUES (?, ?, ?, ?)",
+        (post_id, current_user.id, message, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    count = conn.execute("SELECT COUNT(*) as c FROM feed_comments WHERE post_id = ?", (post_id,)).fetchone()["c"]
+    conn.close()
+    return jsonify({"status": "posted", "comment_count": count}), 201
+
+
+# ---------------------------------------------------------------------------
+# AI Assistant (see utils/assistant.py for the honesty note on what this
+# actually is — a rule-based intent router grounded in real app data, not
+# an LLM. Kept swappable behind generate_assistant_reply()).
+# ---------------------------------------------------------------------------
+@app.route("/api/assistant/chat", methods=["POST"])
+@login_required
+@limiter.limit("60 per hour", methods=["POST"], key_func=_user_rate_limit_key)
+@validate_json(AssistantChatSchema)
+def assistant_chat():
+    data = g.validated_data
+    message = data["message"].strip()
+    lat, lng = data.get("latitude"), data.get("longitude")
+
+    # Pre-classify so we only do the (potentially network-calling) real
+    # data lookups the reply will actually use, not on every message.
+    intent = generate_assistant_reply(message)["intent"]
+    context = {}
+    if intent == "nearby_help" and lat is not None and lng is not None:
+        services, _source = _lookup_nearby_services(lat, lng)
+        context["nearby_services"] = services
+
+    result = generate_assistant_reply(message, context=context)
+
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO assistant_messages (user_id, role, message, intent, created_at) VALUES (?, 'user', ?, ?, ?)",
+        (current_user.id, message, result["intent"], now),
+    )
+    conn.execute(
+        "INSERT INTO assistant_messages (user_id, role, message, intent, created_at) VALUES (?, 'assistant', ?, ?, ?)",
+        (current_user.id, result["reply"], result["intent"], now),
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify(result)
+
+
+@app.route("/api/assistant/history", methods=["GET"])
+@login_required
+def assistant_history():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM assistant_messages WHERE user_id = ? ORDER BY id ASC LIMIT 100",
+        (current_user.id,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
 # ---------------------------------------------------------------------------
 # TIER 2 FEATURE: Offline-first PWA — sync queue
 # ---------------------------------------------------------------------------
@@ -1637,8 +2697,10 @@ def sync_offline_actions():
     it, actually applied (e.g. an SOS raised while offline still triggers
     a real alert once connectivity returns).
     """
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
     actions = data.get("actions", [])
+    if not isinstance(actions, list):
+        return jsonify({"error": "validation_failed", "message": "'actions' must be a list"}), 400
     results = []
 
     conn = get_db()
@@ -1658,21 +2720,38 @@ def sync_offline_actions():
         if action_type == "sos":
             lat = payload.get("latitude")
             lng = payload.get("longitude")
+
+            # CRITICAL BUGFIX: this used to only log the alert + emit an
+            # internal socket event — it never called send_sos_alert(), so
+            # trusted contacts were never actually notified for an SOS that
+            # happened to be raised while offline. That's the one scenario
+            # offline queueing exists to cover.
+            contacts = conn.execute(
+                "SELECT * FROM contacts WHERE user_id = ?", (current_user.id,)
+            ).fetchall()
+            message = _format_sos_message(
+                current_user.email, "offline_sync", lat, lng,
+                accuracy_m=payload.get("accuracy_m"), location_source=payload.get("location_source"),
+            )
+            send_sos_alert(contacts, message)
+
             conn.execute(
                 "INSERT INTO alerts (user_id, trigger_type, latitude, longitude, message, alert_type, created_at) "
                 "VALUES (?, 'offline_sync', ?, ?, ?, 'sos', ?)",
-                (current_user.id, lat, lng, payload.get("message", "SOS raised while offline"), datetime.utcnow().isoformat()),
+                (current_user.id, lat, lng, message, datetime.utcnow().isoformat()),
             )
             conn.commit()
-            socketio.emit("sos_triggered", {
+            offline_sos_payload = {
                 "message": f"Offline SOS from {current_user.email} has just synced",
                 "latitude": lat,
                 "longitude": lng,
-            }, room="sos_room")
+            }
+            socketio.emit("sos_triggered", offline_sos_payload, room=f"user_{current_user.id}")
+            socketio.emit("sos_triggered", offline_sos_payload, room=f"tracking_{current_user.id}")
             applied = True
             logger.info(
-                "SOS triggered (offline sync): user=%s queue_id=%s",
-                hash_identifier(current_user.email), queue_id,
+                "SOS triggered (offline sync): user=%s queue_id=%s contacts_notified=%d",
+                hash_identifier(current_user.email), queue_id, len(contacts),
             )
 
         conn.execute(
@@ -1694,7 +2773,16 @@ def handle_connect():
     logger.info("Client connected: sid=%s", request.sid)
     if current_user.is_authenticated:
         join_room(f"user_{current_user.id}")
-        join_room("sos_room")
+        # CRITICAL SECURITY FIX: this used to also do `join_room("sos_room")`
+        # — a single global room every logged-in user joined. SOS events
+        # (containing the triggering user's email + exact live GPS
+        # coordinates) were broadcast to that room, meaning any other
+        # user on the entire platform received a stranger's real-time
+        # location + identity during an emergency. SOS notifications now
+        # only go to the triggering user's own devices (`user_{id}`, joined
+        # above) and to whoever is actively, authorizedly watching their
+        # live tracking (`tracking_{id}`, joined via join_tracking below,
+        # which already enforces the accepted-linked-contact check).
 
 
 @socketio.on("disconnect")
@@ -1711,7 +2799,16 @@ def handle_subscribe_alerts():
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # TIER 3 FEATURE: Live tracking authorization + WebSocket location updates
+# ---------------------------------------------------------------------------
+# Guardian Dashboard support: an in-memory cache of each user's
+# most-recently-reported battery level. Deliberately not persisted to the
+# DB — this is a live "how reachable is this person right now" signal for
+# whoever is actively watching, not history worth keeping (location_history
+# already persists positions). Reset on server restart, which is fine:
+# a fresh value arrives with that user's next location_update.
+DEVICE_BATTERY_STATE = {}  # user_id -> {"battery_level": int|None, "updated_at": iso str}
 # ---------------------------------------------------------------------------
 
 @socketio.on("join_tracking")
@@ -1762,11 +2859,15 @@ def handle_location_update(data):
 
     lat = data.get("latitude")
     lng = data.get("longitude")
+    battery_level = data.get("battery_level")  # 0-100 int, optional — not every browser exposes this
 
     if lat is None or lng is None:
         return
 
     timestamp = datetime.utcnow().isoformat()
+
+    if isinstance(battery_level, (int, float)) and 0 <= battery_level <= 100:
+        DEVICE_BATTERY_STATE[current_user.id] = {"battery_level": round(battery_level), "updated_at": timestamp}
 
     conn = get_db()
     conn.execute(
@@ -1782,6 +2883,7 @@ def handle_location_update(data):
             "user_id": current_user.id,
             "latitude": lat,
             "longitude": lng,
+            "battery_level": DEVICE_BATTERY_STATE.get(current_user.id, {}).get("battery_level"),
             "timestamp": timestamp,
         },
         room=f"tracking_{current_user.id}",
