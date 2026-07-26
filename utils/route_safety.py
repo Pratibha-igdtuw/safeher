@@ -157,18 +157,38 @@ def derive_open_status(service_type, opening_hours_tag=None):
     return {"status": "hours_vary", "label": "Hours vary — call to confirm"}
 
 
-def fetch_nearby_amenities_osm(lat, lng, amenity_types, radius_m=1500):
-    """Real nearby police/hospital/pharmacy data from OpenStreetMap via the
-    free Overpass API — no API key required. `amenity_types` is a list of
-    OSM `amenity=` tag values (e.g. ["police", "hospital", "pharmacy"]).
-    Returns [] on any failure so the caller can fall back to MOCK_SERVICES."""
-    if requests is None or not amenity_types:
+def fetch_nearby_amenities_osm(lat, lng, categories, radius_m=1500):
+    """Real nearby-service data from OpenStreetMap via the free Overpass
+    API — no API key required.
+
+    `categories` accepts either:
+      - a list of raw OSM `amenity=` tag values (original call style, e.g.
+        ["police", "hospital", "pharmacy"]), or
+      - a dict of {category_name: [(tag_key, tag_value), ...]} for
+        categories that aren't a plain `amenity=` tag (metro stations use
+        `railway`/`station`, public toilets/shelters/taxi stands vary too).
+
+    Every result is tagged with `type` = our own category name (not the
+    raw OSM tag), so callers never have to know which underlying OSM key
+    matched. Returns [] on any failure so the caller can fall back to
+    MOCK_SERVICES."""
+    if requests is None or not categories:
         return []
+
+    tag_filters = categories if isinstance(categories, dict) else {c: [("amenity", c)] for c in categories}
+
     try:
-        amenity_filter = "".join(
-            f'node["amenity"="{a}"](around:{radius_m},{lat},{lng});' for a in amenity_types
-        )
-        query = f"[out:json][timeout:{OSRM_TIMEOUT_SECONDS}];({amenity_filter});out center 30;"
+        filter_parts = []
+        # Recovers which of our friendlier category names a raw (key, value)
+        # OSM tag pair belongs to, since a tag like railway=station doesn't
+        # carry "metro" anywhere in it on its own.
+        category_for_tag = {}
+        for category, tag_pairs in tag_filters.items():
+            for key, value in tag_pairs:
+                filter_parts.append(f'node["{key}"="{value}"](around:{radius_m},{lat},{lng});')
+                category_for_tag[(key, value)] = category
+
+        query = f"[out:json][timeout:{OSRM_TIMEOUT_SECONDS}];({''.join(filter_parts)});out center 30;"
         resp = requests.post(
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
@@ -183,15 +203,22 @@ def fetch_nearby_amenities_osm(lat, lng, amenity_types, radius_m=1500):
             name = tags.get("name")
             if not name:
                 continue  # skip unnamed nodes — not useful in a directory list
-            amenity_type = tags.get("amenity")
+
+            matched_category = next(
+                (category for (key, value), category in category_for_tag.items() if tags.get(key) == value),
+                None,
+            )
+            if matched_category is None:
+                continue
+
             results.append({
                 "name": name,
-                "type": amenity_type,
+                "type": matched_category,
                 "lat": el.get("lat"),
                 "lng": el.get("lon"),
                 "phone": tags.get("phone") or tags.get("contact:phone") or "N/A",
                 "source": "osm",
-                "open_status": derive_open_status(amenity_type, tags.get("opening_hours")),
+                "open_status": derive_open_status(matched_category, tags.get("opening_hours")),
             })
         return results
     except Exception:

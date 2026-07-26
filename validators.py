@@ -178,6 +178,22 @@ class GuardianShareSchema(Schema):
     longitude = LONGITUDE_OPT
 
 
+class MapReportSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    latitude = LATITUDE
+    longitude = LONGITUDE
+    category = fields.Str(
+        required=True,
+        validate=validate.OneOf([
+            "poor_lighting", "harassment", "suspicious_activity", "road_blocked",
+            "unsafe_street", "broken_cctv", "isolated_area",
+        ]),
+    )
+    note = _short_text(500)
+
+
 # ---------------------------------------------------------------------------
 # Journey Mode
 # ---------------------------------------------------------------------------

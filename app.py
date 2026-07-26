@@ -85,6 +85,7 @@ from validators import (
     JourneyStartSchema,
     JourneyLocationSchema,
     JourneyExtendSchema,
+    MapReportSchema,
 )
 
 from config import get_config
@@ -574,6 +575,21 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at
             ON admin_audit_log(created_at DESC);
+
+        -- Safety Map: quick category reports from long-pressing the map
+        -- (poor lighting, harassment, etc). user_id is kept for abuse
+        -- moderation only — it is never returned by the GET endpoint, so
+        -- reports are genuinely anonymous to other users viewing the map.
+        CREATE TABLE IF NOT EXISTS map_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            category TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
         """
     )
     conn.commit()
@@ -1644,6 +1660,66 @@ def risk_zones():
 
 
 # ---------------------------------------------------------------------------
+# Safety Map: long-press "report an unsafe location" markers.
+# Reports are anonymous to other users — the GET endpoint never returns
+# user_id, only category/location/time. user_id is stored purely so an
+# abuse-moderation pass could be added later without a schema change.
+# ---------------------------------------------------------------------------
+MAP_REPORT_LABELS = {
+    "poor_lighting": "Poor lighting",
+    "harassment": "Harassment",
+    "suspicious_activity": "Suspicious activity",
+    "road_blocked": "Road blocked",
+    "unsafe_street": "Unsafe street",
+    "broken_cctv": "Broken CCTV",
+    "isolated_area": "Isolated area",
+}
+
+
+@app.route("/api/map-reports", methods=["POST"])
+@login_required
+@validate_json(MapReportSchema)
+def add_map_report():
+    data = g.validated_data
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO map_reports (user_id, category, latitude, longitude, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (current_user.id, data["category"], data["latitude"], data["longitude"], data.get("note", ""), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "reported", "category": data["category"]})
+
+
+@app.route("/api/map-reports", methods=["GET"])
+@login_required
+def list_map_reports():
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    radius_km = min(max(request.args.get("radius_km", default=5.0, type=float), 0.5), 25)
+
+    conn = get_db()
+    if lat is not None and lng is not None:
+        box = radius_km / 111.0
+        rows = conn.execute(
+            "SELECT category, latitude, longitude, note, created_at FROM map_reports "
+            "WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY id DESC LIMIT 300",
+            (lat - box, lat + box, lng - box, lng + box),
+        ).fetchall()
+        reports = [dict(r) for r in rows if haversine_distance(lat, lng, r["latitude"], r["longitude"]) <= radius_km]
+    else:
+        rows = conn.execute(
+            "SELECT category, latitude, longitude, note, created_at FROM map_reports ORDER BY id DESC LIMIT 300"
+        ).fetchall()
+        reports = [dict(r) for r in rows]
+    conn.close()
+
+    for r in reports:
+        r["label"] = MAP_REPORT_LABELS.get(r["category"], r["category"])
+    return jsonify({"reports": reports})
+
+
+# ---------------------------------------------------------------------------
 # Safe check-in timer (user-specific)
 # ---------------------------------------------------------------------------
 @app.route("/api/checkin/start", methods=["POST"])
@@ -2306,7 +2382,20 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 # ---------------------------------------------------------------------------
 # Nearby safety services directory
 # ---------------------------------------------------------------------------
-OSM_AMENITY_MAP = {"police": "police", "hospital": "hospital", "pharmacy": "pharmacy"}
+OSM_CATEGORY_TAGS = {
+    "police": [("amenity", "police")],
+    "hospital": [("amenity", "hospital")],
+    "pharmacy": [("amenity", "pharmacy")],
+    # Extended categories for the Safety Map's nearby-services list (all
+    # real OSM tags via the same free Overpass lookup — no API key, no
+    # invented coordinates). Coverage for these varies more by city/area
+    # than police/hospital/pharmacy, so an empty result for one of these is
+    # expected in some locations rather than a bug.
+    "metro": [("station", "subway"), ("railway", "station")],
+    "toilet": [("amenity", "toilets")],
+    "shelter": [("social_facility", "shelter"), ("amenity", "social_facility")],
+    "cab_stand": [("amenity", "taxi")],
+}
 
 
 def _lookup_nearby_services(lat, lng, service_type=None):
@@ -2315,9 +2404,9 @@ def _lookup_nearby_services(lat, lng, service_type=None):
     assistant having its own separate (and potentially inconsistent)
     lookup path."""
     osm_results = []
-    if lat is not None and lng is not None and (service_type is None or service_type in OSM_AMENITY_MAP):
-        amenity_types = [OSM_AMENITY_MAP[service_type]] if service_type in OSM_AMENITY_MAP else list(OSM_AMENITY_MAP.values())
-        osm_results = fetch_nearby_amenities_osm(lat, lng, amenity_types)
+    if lat is not None and lng is not None and (service_type is None or service_type in OSM_CATEGORY_TAGS):
+        tag_filters = {service_type: OSM_CATEGORY_TAGS[service_type]} if service_type in OSM_CATEGORY_TAGS else OSM_CATEGORY_TAGS
+        osm_results = fetch_nearby_amenities_osm(lat, lng, tag_filters)
 
     if osm_results:
         source = "osm"
