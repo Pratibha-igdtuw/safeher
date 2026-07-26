@@ -121,6 +121,7 @@
     const selectors = [
       "#alertsList", "#contactsList", "#servicesList", "#feedList",
       "#incomingInvitesList", "#canTrackMeList",
+      "#hubContactsList", "#emergencyHelplinesList",
     ];
 
     selectors.forEach((sel) => {

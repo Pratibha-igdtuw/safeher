@@ -38,7 +38,7 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="home">Home</button>
     <button class="tab-btn" data-tab="map">Safety Map</button>
-    <button class="tab-btn" data-tab="directory">Directory</button>
+    <button class="tab-btn" data-tab="directory" aria-label="Safety Hub — emergency services, contacts and helplines">Safety Hub</button>
     <button class="tab-btn" data-tab="guardian">Guardian</button>
     <button class="tab-btn" data-tab="community">Community</button>
     <button class="tab-btn" data-tab="assistant">🤖 Assistant</button>
@@ -411,21 +411,65 @@
 
 <!-- ============================= DIRECTORY TAB ============================= -->
 <main id="tab-directory" class="tab-panel hidden">
-  <section class="card">
-    <h2>National Emergency Helplines (India)</h2>
-    <p class="muted">Tap any number to call it directly — no need to dial manually.</p>
-    <ul id="emergencyHelplinesList" class="services-list"></ul>
+
+  <!-- ===================== HERO HEADER ===================== -->
+  <section class="hub-hero">
+    <span class="hub-hero-eyebrow">🛟 Safety Hub</span>
+    <h1>Emergency Assistance Hub</h1>
+    <p>Find nearby emergency services, trusted contacts, and national helplines instantly.</p>
+    <div class="hub-search-bar">
+      <span class="hub-search-icon" aria-hidden="true">🔍</span>
+      <input
+        id="hubSearchInput"
+        type="text"
+        placeholder="Search police, hospital, pharmacy, shelter…"
+        aria-label="Search emergency services, contacts, and helplines"
+      />
+    </div>
   </section>
 
-  <section class="card">
-    <h2>Nearby Safety Services</h2>
-    <p class="muted">Police stations, hospitals, pharmacies, and helplines closest to you.</p>
-    <div class="row">
+  <!-- ===================== QUICK EMERGENCY ACTIONS ===================== -->
+  <section class="hub-quick-actions" aria-label="Quick emergency actions">
+    <a href="tel:112" class="hub-quick-action-card hub-quick-action-danger">
+      <span class="hub-quick-action-icon" aria-hidden="true">🚨</span>
+      <span class="hub-quick-action-label">Call 112</span>
+    </a>
+    <button id="hubCallEmergencyContactBtn" class="hub-quick-action-card">
+      <span class="hub-quick-action-icon" aria-hidden="true">❤️</span>
+      <span class="hub-quick-action-label">Call Emergency Contact</span>
+    </button>
+    <button id="hubShareLocationBtn" class="hub-quick-action-card">
+      <span class="hub-quick-action-icon" aria-hidden="true">📍</span>
+      <span class="hub-quick-action-label">Share Live Location</span>
+    </button>
+    <button id="hubFindPoliceBtn" class="hub-quick-action-card">
+      <span class="hub-quick-action-icon" aria-hidden="true">🗺️</span>
+      <span class="hub-quick-action-label">Find Nearest Police</span>
+    </button>
+  </section>
+
+  <!-- ===================== CATEGORY FILTERS ===================== -->
+  <section class="card hub-filters-card">
+    <div class="hub-chip-row" role="group" aria-label="Filter by category">
       <button class="btn filter-btn active" data-type="">All</button>
-      <button class="btn filter-btn" data-type="police">Police</button>
-      <button class="btn filter-btn" data-type="hospital">Hospital</button>
-      <button class="btn filter-btn" data-type="pharmacy">Pharmacy</button>
-      <button class="btn filter-btn" data-type="helpline">Helpline</button>
+      <button class="btn filter-btn" data-type="police">🚓 Police</button>
+      <button class="btn filter-btn" data-type="hospital">🏥 Hospital</button>
+      <button class="btn filter-btn" data-type="pharmacy">💊 Pharmacy</button>
+      <button class="btn filter-btn" data-type="helpline">📞 Women Helpline</button>
+      <button class="btn filter-btn" data-type="shelter">🏠 Shelters</button>
+      <button class="btn filter-btn" data-type="ngo">🤝 NGOs</button>
+      <button class="btn filter-btn" data-type="contacts">👥 Emergency Contacts</button>
+    </div>
+  </section>
+
+  <!-- ===================== NEARBY SERVICES ===================== -->
+  <section class="card" id="hubNearbySection">
+    <h2>Nearby Services</h2>
+    <p class="muted">Police stations, hospitals, and pharmacies closest to you, with live distance and open status.</p>
+    <div id="hubLocationEmptyState" class="hub-empty-state hidden">
+      <span class="hub-empty-state-icon" aria-hidden="true">📍</span>
+      <p>Enable your location to discover nearby emergency services.</p>
+      <button id="hubEnableLocationBtn" class="btn safe-btn">Enable Location</button>
     </div>
     <ul id="servicesList" class="services-list">
       <li class="skeleton-item"></li>
@@ -433,7 +477,27 @@
       <li class="skeleton-item"></li>
     </ul>
   </section>
+
+  <!-- ===================== EMERGENCY CONTACTS ===================== -->
+  <section class="card" id="hubContactsSection">
+    <h2>Emergency Contacts</h2>
+    <p class="muted">Your trusted contacts, one tap away.</p>
+    <ul id="hubContactsList" class="hub-contacts-list"></ul>
+    <div id="hubContactsEmptyState" class="hub-empty-state hidden">
+      <span class="hub-empty-state-icon" aria-hidden="true">❤️</span>
+      <p>You haven't added any emergency contacts yet.</p>
+      <button id="hubAddContactBtn" class="btn safe-btn">Add Emergency Contact</button>
+    </div>
+  </section>
+
+  <!-- ===================== NATIONAL HELPLINES ===================== -->
+  <section class="card">
+    <h2>National Emergency Helplines (India)</h2>
+    <p class="muted">Tap any number to call it directly — no need to dial manually.</p>
+    <ul id="emergencyHelplinesList" class="hub-helpline-grid"></ul>
+  </section>
 </main>
+
 
 <!-- ============================= GUARDIAN TAB ============================= -->
 <main id="tab-guardian" class="tab-panel hidden">

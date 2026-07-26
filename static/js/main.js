@@ -261,11 +261,17 @@ function activateTab(btn) {
   const heroEl = document.getElementById("tab-home-hero");
   if (heroEl) heroEl.classList.toggle("hidden", btn.dataset.tab !== "home");
 
+  // The Safety Hub has its own hero header; the global status strip
+  // (Safety Score / Journey / Guardian) is still shown on every other tab.
+  const statusStripEl = document.getElementById("statusStrip");
+  if (statusStripEl) statusStripEl.classList.toggle("hidden", btn.dataset.tab === "directory");
+
   if (btn.dataset.tab === "map") {
     setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
   }
   if (btn.dataset.tab === "directory") {
-    loadServices(currentServiceFilter);
+    applyHubFilters();
+    loadHubContacts();
   }
   if (btn.dataset.tab === "guardian") {
     setTimeout(() => bubbleMap && bubbleMap.invalidateSize(), 50);
@@ -2069,65 +2075,131 @@ const routeResult = document.getElementById("routeResult");
 setTimeout(initMap, 100);
 
 // ---------------------------------------------------------------------------
-// Directory / Nearby Services
+// Safety Hub (formerly "Directory") — Nearby Services, Emergency Contacts,
+// National Helplines, quick actions, category filters, and search.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// National Emergency Helplines (India) — static, click-to-call
+// National Emergency Helplines (India) — static, click-to-call.
+// `category` lines these up with the filter chips below. Two chips
+// ("Shelters", "NGOs") don't correspond to a real amenity type the backend
+// queries (/api/nearby-services only covers police/hospital/pharmacy, per
+// OSM_AMENITY_MAP in app.py) — rather than invent fake nearby listings for
+// them, they surface the genuinely-relevant entries from this list instead
+// (e.g. the National Commission for Women is a real NGO helpline).
 // ---------------------------------------------------------------------------
 const INDIA_EMERGENCY_NUMBERS = [
-  { name: "All-in-One Emergency (Police/Fire/Ambulance)", number: "112" },
-  { name: "Police", number: "100" },
-  { name: "Women Helpline", number: "1091" },
-  { name: "Women Helpline (Domestic Abuse)", number: "181" },
-  { name: "Ambulance", number: "102" },
-  { name: "Fire", number: "101" },
-  { name: "Child Helpline", number: "1098" },
-  { name: "National Commission for Women", number: "7827170170" },
-  { name: "Cyber Crime Helpline", number: "1930" },
-  { name: "Disaster Management", number: "108" },
+  { name: "All-in-One Emergency", number: "112", category: "police", description: "Police • Fire • Ambulance" },
+  { name: "Police", number: "100", category: "police", description: "Direct police line" },
+  { name: "Women Helpline", number: "1091", category: "helpline", description: "24/7 women's safety line" },
+  { name: "Women Helpline (Domestic Abuse)", number: "181", category: "helpline", description: "Domestic abuse support" },
+  { name: "Ambulance", number: "102", category: "hospital", description: "Medical emergency" },
+  { name: "Fire", number: "101", category: "police", description: "Fire emergency" },
+  { name: "Child Helpline", number: "1098", category: "shelter", description: "Child protection & shelter referrals" },
+  { name: "National Commission for Women", number: "7827170170", category: "ngo", description: "Complaints, referrals, legal guidance" },
+  { name: "Cyber Crime Helpline", number: "1930", category: "helpline", description: "Report online harassment or fraud" },
+  { name: "Disaster Management", number: "108", category: "hospital", description: "Emergency response & rescue" },
 ];
 
-function renderEmergencyHelplines() {
+const HELPLINE_ICONS = { police: "🚨", hospital: "🚑", helpline: "📞", shelter: "🏠", ngo: "🤝" };
+
+function renderEmergencyHelplines(filterCategory, searchTerm) {
   const list = document.getElementById("emergencyHelplinesList");
   if (!list) return;
-  list.innerHTML = INDIA_EMERGENCY_NUMBERS.map(
-    (e) =>
-      `<li style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-        <span><strong>${e.name}</strong><br/><span style="font-size:11px; color:#888;">${e.number}</span></span>
-        <a href="tel:${e.number}" class="tel-call-btn">Call</a>
-      </li>`
-  ).join("");
+
+  const term = (searchTerm || "").toLowerCase();
+  const filtered = INDIA_EMERGENCY_NUMBERS.filter((e) => {
+    const matchesCategory = !filterCategory || filterCategory === "contacts" || e.category === filterCategory;
+    const matchesSearch = !term || e.name.toLowerCase().includes(term) || e.description.toLowerCase().includes(term);
+    return matchesCategory && matchesSearch;
+  });
+
+  list.innerHTML = filtered.length
+    ? filtered
+        .map(
+          (e) => `<li class="hub-helpline-card">
+            <span class="hub-helpline-icon" aria-hidden="true">${HELPLINE_ICONS[e.category] || "☎️"}</span>
+            <div class="hub-helpline-info">
+              <strong>${escapeHtml(e.name)}</strong>
+              <span class="hub-helpline-number">${escapeHtml(e.number)}</span>
+              <span class="muted hub-helpline-desc">${escapeHtml(e.description)}</span>
+            </div>
+            <a href="tel:${escapeHtml(e.number)}" class="btn safe-btn hub-helpline-call">📞 Call</a>
+          </li>`
+        )
+        .join("")
+    : `<li class="muted" style="border:none;">No helplines match "${escapeHtml(searchTerm || "")}".</li>`;
 }
 
 renderEmergencyHelplines();
 
 const servicesList = document.getElementById("servicesList");
 const filterBtns = document.querySelectorAll(".filter-btn");
+const hubLocationEmptyState = document.getElementById("hubLocationEmptyState");
+const hubSearchInput = document.getElementById("hubSearchInput");
 let currentServiceFilter = "";
+
+// Amenity types the real backend actually supports for live nearby lookup.
+const BACKEND_SUPPORTED_TYPES = ["police", "hospital", "pharmacy", "helpline"];
 
 filterBtns.forEach((btn) => {
   btn.addEventListener("click", () => {
     filterBtns.forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     currentServiceFilter = btn.dataset.type;
-    loadServices(currentServiceFilter);
+    applyHubFilters();
+
+    if (currentServiceFilter === "contacts") {
+      document.getElementById("hubContactsSection")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   });
 });
 
-async function loadServices(serviceType) {
+hubSearchInput?.addEventListener("input", () => applyHubFilters());
+
+function applyHubFilters() {
+  const searchTerm = hubSearchInput?.value.trim() || "";
+
+  // Nearby Services only re-fetches for backend-supported types; for
+  // "shelter"/"ngo" it shows an honest message instead of pretending to
+  // have live data the backend can't provide.
+  if (!currentServiceFilter || BACKEND_SUPPORTED_TYPES.includes(currentServiceFilter)) {
+    loadServices(currentServiceFilter, searchTerm);
+  } else {
+    servicesList.innerHTML = `<li class="muted" style="border:none; grid-column:1/-1;">
+      Live nearby listings for this category aren't available yet — see National Helplines below for relevant support numbers.
+    </li>`;
+  }
+
+  renderEmergencyHelplines(currentServiceFilter, searchTerm);
+  filterHubContacts(searchTerm);
+}
+
+async function loadServices(serviceType, searchTerm) {
   const loc = await getLocation();
   if (!loc.latitude || !loc.longitude) {
-    servicesList.innerHTML = '<li class="muted" style="border:none;">Location not available</li>';
+    servicesList.innerHTML = "";
+    hubLocationEmptyState?.classList.remove("hidden");
     return;
   }
+  hubLocationEmptyState?.classList.add("hidden");
 
   const data = await api(`/api/nearby-services?lat=${loc.latitude}&lng=${loc.longitude}${serviceType ? "&type=" + serviceType : ""}`);
   if (!data._ok || !Array.isArray(data.results) || data.results.length === 0) {
-    servicesList.innerHTML = '<li class="muted" style="border:none;">No nearby services found.</li>';
+    servicesList.innerHTML = '<li class="muted" style="border:none; grid-column:1/-1;">No nearby services found.</li>';
     return;
   }
 
-  servicesList.innerHTML = data.results
+  let results = data.results;
+  if (searchTerm) {
+    const term = searchTerm.toLowerCase();
+    results = results.filter((s) => s.name.toLowerCase().includes(term) || s.type.toLowerCase().includes(term));
+  }
+  if (results.length === 0) {
+    servicesList.innerHTML = `<li class="muted" style="border:none; grid-column:1/-1;">No nearby services match "${escapeHtml(searchTerm)}".</li>`;
+    return;
+  }
+
+  servicesList.innerHTML = results
     .map((s) => {
       const icon = SERVICE_ICONS[s.type] || "📍";
       const callLink =
@@ -2155,6 +2227,99 @@ async function loadServices(serviceType) {
     })
     .join("");
 }
+
+document.getElementById("hubEnableLocationBtn")?.addEventListener("click", () => loadServices(currentServiceFilter, hubSearchInput?.value.trim()));
+
+// ---------------------------------------------------------------------------
+// Emergency Contacts mini-list on the Safety Hub — reads the same
+// /api/contacts data the Guardian tab manages; adding/removing contacts
+// still happens there (single source of truth for that logic).
+// ---------------------------------------------------------------------------
+const hubContactsList = document.getElementById("hubContactsList");
+const hubContactsEmptyState = document.getElementById("hubContactsEmptyState");
+let hubContactsCache = [];
+
+async function loadHubContacts() {
+  const contacts = await api("/api/contacts");
+  hubContactsCache = Array.isArray(contacts) ? contacts : [];
+  filterHubContacts(hubSearchInput?.value.trim() || "");
+}
+
+function filterHubContacts(searchTerm) {
+  if (!hubContactsList) return;
+  const term = (searchTerm || "").toLowerCase();
+  const filtered = hubContactsCache.filter((c) => !term || c.name.toLowerCase().includes(term));
+
+  if (hubContactsCache.length === 0) {
+    hubContactsList.innerHTML = "";
+    hubContactsEmptyState?.classList.remove("hidden");
+    return;
+  }
+  hubContactsEmptyState?.classList.add("hidden");
+
+  hubContactsList.innerHTML = filtered.length
+    ? filtered
+        .map(
+          (c) => `<li class="hub-contact-card">
+            <span class="hub-contact-avatar" aria-hidden="true">❤️</span>
+            <div class="hub-contact-info">
+              <strong>${escapeHtml(c.name)}</strong>
+              <span class="muted" style="font-size:11px;">${escapeHtml(c.relation || "contact")}</span>
+            </div>
+            <div class="hub-contact-actions">
+              <a href="tel:${escapeHtml(c.phone)}" class="btn safe-btn" style="padding:6px 12px; font-size:12px;">📞 Call</a>
+              <button class="btn secondary hub-share-location-btn" style="padding:6px 12px; font-size:12px;">📍 Share Location</button>
+            </div>
+          </li>`
+        )
+        .join("")
+    : `<li class="muted" style="border:none;">No contacts match "${escapeHtml(searchTerm)}".</li>`;
+}
+
+document.getElementById("hubAddContactBtn")?.addEventListener("click", () => {
+  document.querySelector('[data-tab="guardian"]')?.click();
+  setTimeout(() => document.getElementById("contactName")?.focus(), 300);
+});
+
+// ---------------------------------------------------------------------------
+// Quick Emergency Actions — every one of these forwards to a real, already-
+// wired feature rather than introducing new backend behavior.
+// ---------------------------------------------------------------------------
+document.getElementById("hubCallEmergencyContactBtn")?.addEventListener("click", () => {
+  if (hubContactsCache.length > 0) {
+    window.location.href = `tel:${hubContactsCache[0].phone}`;
+  } else {
+    showNotification("No emergency contact yet", "Add one below to enable one-tap calling.", "info");
+    document.getElementById("hubContactsSection")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+});
+
+document.getElementById("hubShareLocationBtn")?.addEventListener("click", () => {
+  // Forwards to the Guardian tab's real "Start Sharing" button — same
+  // code path, same /api/guardian/share call, no duplicated logic.
+  document.getElementById("shareLocationBtn")?.click();
+  showNotification("📍 Sharing started", "Your live location is now visible to your Bubble.", "info");
+});
+
+document.getElementById("hubFindPoliceBtn")?.addEventListener("click", () => {
+  const policeChip = document.querySelector('.filter-btn[data-type="police"]');
+  policeChip?.click();
+  document.getElementById("hubNearbySection")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+// Delegated handler for the per-contact "Share Location" buttons (list is
+// re-rendered on every refresh, so a delegated listener on the parent
+// avoids re-binding on each render).
+hubContactsList?.addEventListener("click", (e) => {
+  if (e.target.closest(".hub-share-location-btn")) {
+    document.getElementById("shareLocationBtn")?.click();
+    showNotification("📍 Sharing started", "Your live location is now visible to your Bubble.", "info");
+  }
+});
+
+loadHubContacts();
+
+
 
 // ---------------------------------------------------------------------------
 // AI Assistant
