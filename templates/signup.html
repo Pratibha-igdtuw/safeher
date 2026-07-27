@@ -1,14 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SafeHer — Sign Up</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600&display=swap" />
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600&display=swap" />
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
     :root {
       --bg: #f6f2fd;
@@ -20,7 +26,7 @@
       --safe: #0f9d70;
       --text: #241c3d;
       --muted: #6b6488;
-      --border: rgba(124,58,237,0.14);
+      --border: rgba(124, 58, 237, 0.14);
     }
 
     body {
@@ -32,8 +38,8 @@
       justify-content: center;
       padding: 16px;
       background:
-        radial-gradient(700px 500px at 12% -8%, rgba(139,92,246,0.22), transparent 60%),
-        radial-gradient(600px 480px at 105% 8%, rgba(8,145,178,0.14), transparent 55%),
+        radial-gradient(700px 500px at 12% -8%, rgba(139, 92, 246, 0.22), transparent 60%),
+        radial-gradient(600px 480px at 105% 8%, rgba(8, 145, 178, 0.14), transparent 55%),
         linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
       overflow: hidden;
     }
@@ -52,7 +58,12 @@
       opacity: 0.6;
       pointer-events: none;
     }
-    @media (max-width: 900px) { .orb-stage { display: none; } }
+
+    @media (max-width: 900px) {
+      .orb-stage {
+        display: none;
+      }
+    }
 
     .guardian-orb {
       position: relative;
@@ -61,48 +72,87 @@
       transform-style: preserve-3d;
       animation: orb-float 7s ease-in-out infinite;
     }
+
     .orb-core {
       position: absolute;
       inset: 90px;
       border-radius: 50%;
       background: radial-gradient(circle at 35% 30%, #efe7fb, var(--violet) 55%, var(--violet-2) 100%);
-      box-shadow: 0 0 70px rgba(139,92,246,0.4);
+      box-shadow: 0 0 70px rgba(139, 92, 246, 0.4);
     }
+
     .orb-ring {
       position: absolute;
       inset: 0;
       border-radius: 50%;
-      border: 1px solid rgba(124,58,237,0.22);
+      border: 1px solid rgba(124, 58, 237, 0.22);
       transform-style: preserve-3d;
       animation: orb-spin linear infinite;
     }
+
     .orb-ring::before {
       content: "";
       position: absolute;
-      top: -2px; left: 50%;
-      width: 6px; height: 6px;
+      top: -2px;
+      left: 50%;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
       background: var(--cyan);
       box-shadow: 0 0 12px var(--cyan);
       transform: translateX(-50%);
     }
-    .orb-ring.r1 { transform: rotateX(70deg) rotateZ(0deg); animation-duration: 10s; }
-    .orb-ring.r2 { inset: 28px; transform: rotateX(70deg) rotateY(35deg); animation-duration: 14s; animation-direction: reverse; border-color: rgba(8,145,178,0.3); }
-    .orb-ring.r3 { inset: 56px; transform: rotateX(70deg) rotateY(-40deg); animation-duration: 8s; border-color: rgba(244,63,94,0.3); }
-    .orb-ring.r3::before { background: var(--coral); box-shadow: 0 0 12px var(--coral); }
-    @keyframes orb-spin { to { transform: rotateX(70deg) rotateZ(360deg); } }
+
+    .orb-ring.r1 {
+      transform: rotateX(70deg) rotateZ(0deg);
+      animation-duration: 10s;
+    }
+
+    .orb-ring.r2 {
+      inset: 28px;
+      transform: rotateX(70deg) rotateY(35deg);
+      animation-duration: 14s;
+      animation-direction: reverse;
+      border-color: rgba(8, 145, 178, 0.3);
+    }
+
+    .orb-ring.r3 {
+      inset: 56px;
+      transform: rotateX(70deg) rotateY(-40deg);
+      animation-duration: 8s;
+      border-color: rgba(244, 63, 94, 0.3);
+    }
+
+    .orb-ring.r3::before {
+      background: var(--coral);
+      box-shadow: 0 0 12px var(--coral);
+    }
+
+    @keyframes orb-spin {
+      to {
+        transform: rotateX(70deg) rotateZ(360deg);
+      }
+    }
+
     @keyframes orb-float {
-      0%, 100% { transform: translateY(0) rotateX(4deg) rotateY(-6deg); }
-      50%      { transform: translateY(-12px) rotateX(-2deg) rotateY(6deg); }
+
+      0%,
+      100% {
+        transform: translateY(0) rotateX(4deg) rotateY(-6deg);
+      }
+
+      50% {
+        transform: translateY(-12px) rotateX(-2deg) rotateY(6deg);
+      }
     }
 
     .container {
       position: relative;
       z-index: 2;
-      background: linear-gradient(165deg, rgba(255,255,255,0.9), rgba(255,255,255,0.7));
+      background: linear-gradient(165deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.7));
       border: 1px solid var(--border);
       border-radius: 22px;
-      box-shadow: 0 1px 0 rgba(255,255,255,0.8) inset, 0 30px 70px -20px rgba(88,44,166,0.28), 0 0 0 1px rgba(139,92,246,0.08);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 30px 70px -20px rgba(88, 44, 166, 0.28), 0 0 0 1px rgba(139, 92, 246, 0.08);
       backdrop-filter: blur(20px) saturate(140%);
       -webkit-backdrop-filter: blur(20px) saturate(140%);
       max-width: 420px;
@@ -127,7 +177,7 @@
       height: 42px;
       border-radius: 13px;
       background: linear-gradient(145deg, var(--violet), var(--cyan));
-      box-shadow: 0 10px 24px -8px rgba(139,92,246,0.5);
+      box-shadow: 0 10px 24px -8px rgba(139, 92, 246, 0.5);
     }
 
     .brand-name {
@@ -153,7 +203,9 @@
       margin-bottom: 26px;
     }
 
-    .form-group { margin-bottom: 16px; }
+    .form-group {
+      margin-bottom: 16px;
+    }
 
     label {
       display: block;
@@ -165,10 +217,12 @@
       text-transform: uppercase;
     }
 
-    input[type="email"], input[type="password"], input[type="text"] {
+    input[type="email"],
+    input[type="password"],
+    input[type="text"] {
       width: 100%;
       padding: 12px 14px;
-      background: rgba(255,255,255,0.7);
+      background: rgba(255, 255, 255, 0.7);
       border: 1px solid var(--border);
       color: var(--text);
       border-radius: 10px;
@@ -177,11 +231,13 @@
       font-family: inherit;
     }
 
-    input[type="email"]:focus, input[type="password"]:focus, input[type="text"]:focus {
+    input[type="email"]:focus,
+    input[type="password"]:focus,
+    input[type="text"]:focus {
       outline: none;
       border-color: var(--violet);
       background: #ffffff;
-      box-shadow: 0 0 0 3px rgba(139,92,246,0.16);
+      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.16);
     }
 
     .btn {
@@ -198,18 +254,40 @@
       cursor: pointer;
       transition: all 0.2s;
       margin-top: 6px;
-      box-shadow: 0 14px 30px -12px rgba(139,92,246,0.55);
+      box-shadow: 0 14px 30px -12px rgba(139, 92, 246, 0.55);
     }
 
-    .btn:hover { transform: translateY(-2px); box-shadow: 0 18px 36px -10px rgba(139,92,246,0.65); }
-    .btn:active { transform: translateY(0) scale(0.98); box-shadow: 0 8px 18px -10px rgba(139,92,246,0.5); }
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 18px 36px -10px rgba(139, 92, 246, 0.65);
+    }
+
+    .btn:active {
+      transform: translateY(0) scale(0.98);
+      box-shadow: 0 8px 18px -10px rgba(139, 92, 246, 0.5);
+    }
 
     @keyframes container-in {
-      from { opacity: 0; transform: perspective(1200px) rotateX(1deg) translateY(18px) scale(0.98); }
-      to   { opacity: 1; transform: perspective(1200px) rotateX(1deg) translateY(0) scale(1); }
+      from {
+        opacity: 0;
+        transform: perspective(1200px) rotateX(1deg) translateY(18px) scale(0.98);
+      }
+
+      to {
+        opacity: 1;
+        transform: perspective(1200px) rotateX(1deg) translateY(0) scale(1);
+      }
     }
-    .container { animation: container-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
-    @media (prefers-reduced-motion: reduce) { .container { animation: none; } }
+
+    .container {
+      animation: container-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .container {
+        animation: none;
+      }
+    }
 
     .status {
       margin-top: 16px;
@@ -222,15 +300,15 @@
     }
 
     .status.error {
-      background: rgba(244,63,94,0.10);
-      border-color: rgba(244,63,94,0.3);
+      background: rgba(244, 63, 94, 0.10);
+      border-color: rgba(244, 63, 94, 0.3);
       color: #be123c;
       display: block;
     }
 
     .status.success {
-      background: rgba(15,157,112,0.10);
-      border-color: rgba(15,157,112,0.3);
+      background: rgba(15, 157, 112, 0.10);
+      border-color: rgba(15, 157, 112, 0.3);
       color: #0f7a58;
       display: block;
     }
@@ -242,110 +320,174 @@
       color: var(--muted);
     }
 
-    .footer a { color: var(--cyan); text-decoration: none; font-weight: 600; }
-    .footer a:hover { text-decoration: underline; }
+    .footer a {
+      color: var(--cyan);
+      text-decoration: none;
+      font-weight: 600;
+    }
 
-    .loading { display: none; text-align: center; color: var(--cyan); font-size: 12px; margin-top: 10px; }
+    .footer a:hover {
+      text-decoration: underline;
+    }
 
-    .hidden { display: none; }
+    .loading {
+      display: none;
+      text-align: center;
+      color: var(--cyan);
+      font-size: 12px;
+      margin-top: 10px;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .password-wrapper {
+      position: relative;
+    }
+
+    .password-wrapper input {
+      width: 100%;
+      padding-right: 45px;
+    }
+
+    .toggle-password {
+      position: absolute;
+      right: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      cursor: pointer;
+      font-size: 18px;
+      color: #777;
+      user-select: none;
+    }
+
+    .toggle-password:hover {
+      color: #5b21b6;
+    }
   </style>
 </head>
+
 <body>
 
-<div class="orb-stage" aria-hidden="true">
-  <div class="guardian-orb">
-    <div class="orb-core"></div>
-    <div class="orb-ring r1"></div>
-    <div class="orb-ring r2"></div>
-    <div class="orb-ring r3"></div>
-  </div>
-</div>
-
-<div class="container">
-  <div class="brand">
-    <span class="brand-icon">🛡️</span>
-    <span class="brand-name">SafeHer</span>
+  <div class="orb-stage" aria-hidden="true">
+    <div class="guardian-orb">
+      <div class="orb-core"></div>
+      <div class="orb-ring r1"></div>
+      <div class="orb-ring r2"></div>
+      <div class="orb-ring r3"></div>
+    </div>
   </div>
 
-  <h2>Join your guardian circle</h2>
-  <p class="subhead">Set up your account in under a minute.</p>
-
-  <form id="signupForm">
-    <div class="form-group">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required placeholder="you@example.com" />
+  <div class="container">
+    <div class="brand">
+      <span class="brand-icon">🛡️</span>
+      <span class="brand-name">SafeHer</span>
     </div>
 
-    <div class="form-group">
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" required placeholder="••••••••" minlength="6" />
+    <h2>Join your guardian circle</h2>
+    <p class="subhead">Set up your account in under a minute.</p>
+
+    <form id="signupForm">
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required placeholder="you@example.com" />
+      </div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+
+        <div class="password-wrapper">
+          <input type="password" id="password" name="password" required placeholder="••••••••" minlength="6" />
+
+          <span class="toggle-password" onclick="togglePassword()">
+            👁️
+          </span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="passwordConfirm">Confirm Password</label>
+        <input type="password" id="passwordConfirm" name="passwordConfirm" required placeholder="••••••••"
+          minlength="6" />
+      </div>
+
+      <button type="submit" class="btn">Sign Up</button>
+      <div class="loading" id="loading">Creating account...</div>
+    </form>
+
+    <div class="status" id="status"></div>
+
+    <div class="footer">
+      Already have an account? <a href="/login">Login here</a>
     </div>
-
-    <div class="form-group">
-      <label for="passwordConfirm">Confirm Password</label>
-      <input type="password" id="passwordConfirm" name="passwordConfirm" required placeholder="••••••••" minlength="6" />
-    </div>
-
-    <button type="submit" class="btn">Sign Up</button>
-    <div class="loading" id="loading">Creating account...</div>
-  </form>
-
-  <div class="status" id="status"></div>
-
-  <div class="footer">
-    Already have an account? <a href="/login">Login here</a>
   </div>
-</div>
 
-<script>
-  const form = document.getElementById("signupForm");
-  const emailInput = document.getElementById("email");
-  const passwordInput = document.getElementById("password");
-  const passwordConfirmInput = document.getElementById("passwordConfirm");
-  const statusEl = document.getElementById("status");
-  const loadingEl = document.getElementById("loading");
+  <script>
+    const form = document.getElementById("signupForm");
+    const emailInput = document.getElementById("email");
+    const passwordInput = document.getElementById("password");
+    const passwordConfirmInput = document.getElementById("passwordConfirm");
+    const statusEl = document.getElementById("status");
+    const loadingEl = document.getElementById("loading");
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
 
-    if (passwordInput.value !== passwordConfirmInput.value) {
-      statusEl.className = "status error";
-      statusEl.textContent = "✗ Passwords do not match";
-      statusEl.style.display = "block";
-      return;
-    }
-
-    statusEl.style.display = "none";
-    loadingEl.style.display = "block";
-
-    try {
-      const res = await fetch("/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: emailInput.value.trim().toLowerCase(),
-          password: passwordInput.value,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        statusEl.className = "status success";
-        statusEl.textContent = "✓ Account created! Redirecting...";
+      if (passwordInput.value !== passwordConfirmInput.value) {
+        statusEl.className = "status error";
+        statusEl.textContent = "✗ Passwords do not match";
         statusEl.style.display = "block";
-        setTimeout(() => (window.location.href = "/dashboard"), 1500);
-      } else {
-        throw new Error(data.error || "Sign up failed");
+        return;
       }
-    } catch (err) {
-      loadingEl.style.display = "none";
-      statusEl.className = "status error";
-      statusEl.textContent = "✗ " + err.message;
-      statusEl.style.display = "block";
+
+      statusEl.style.display = "none";
+      loadingEl.style.display = "block";
+
+      try {
+        const res = await fetch("/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: emailInput.value.trim().toLowerCase(),
+            password: passwordInput.value,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+          statusEl.className = "status success";
+          statusEl.textContent = "✓ Account created! Redirecting...";
+          statusEl.style.display = "block";
+          setTimeout(() => (window.location.href = "/dashboard"), 1500);
+        } else {
+          throw new Error(data.error || "Sign up failed");
+        }
+      } catch (err) {
+        loadingEl.style.display = "none";
+        statusEl.className = "status error";
+        statusEl.textContent = "✗ " + err.message;
+        statusEl.style.display = "block";
+      }
+    });
+
+    function togglePassword() {
+
+      const password = document.getElementById("password");
+      const eye = document.querySelectorAll(".toggle-password")[0];
+
+      if (password.type === "password") {
+        password.type = "text";
+        eye.innerHTML = "🙈";
+      } else {
+        password.type = "password";
+        eye.innerHTML = "👁️";
+      }
+
     }
-  });
-</script>
+  </script>
 
 </body>
+
 </html>
