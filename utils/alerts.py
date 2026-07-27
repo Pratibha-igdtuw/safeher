@@ -43,6 +43,35 @@ SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USERNAME)
 # ---------------------------------------------------------------------------
 
 
+def send_email(to_address, subject, body):
+    """Generic single-recipient email send, sharing the exact same
+    SMTP_*/EMAIL_MOCK_MODE configuration (and mock-mode fallback) as the
+    SOS contact emails below instead of duplicating it.
+
+    Used by the account-recovery flow (password reset emails) in app.py.
+    Prints to the console in mock mode so the feature is demoable with
+    zero SMTP setup, exactly like the rest of this module.
+
+    Returns {"status": "sent"} / {"status": "sent (mock)"} / {"status": "failed: ..."}.
+    """
+    if EMAIL_MOCK_MODE:
+        print(f"[MOCK EMAIL] To: {to_address} -> Subject: {subject}\n{body}")
+        return {"status": "sent (mock)"}
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            mail = MIMEText(body)
+            mail["Subject"] = subject
+            mail["From"] = SMTP_FROM_EMAIL
+            mail["To"] = to_address
+            server.sendmail(SMTP_FROM_EMAIL, [to_address], mail.as_string())
+        return {"status": "sent"}
+    except Exception as e:  # noqa: BLE001
+        return {"status": f"failed: {e}"}
+
+
 def send_sos_alert(contacts, message):
     """
     Sends the SOS message to every trusted contact, by SMS (if a phone is

@@ -57,6 +57,13 @@ def client(db_path, monkeypatch):
 
     app_module.init_db()
 
+    # Flask-Limiter's default in-memory storage is a process-wide
+    # singleton, not reset per DB file like everything else here — without
+    # this, tests hitting rate-limited endpoints (login/signup/etc.)
+    # accumulate hits across the whole test session and start failing
+    # with unrelated 429s depending on run order / what ran before them.
+    app_module.limiter.reset()
+
     with app_module.app.test_client() as c:
         yield c
 

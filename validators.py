@@ -61,6 +61,35 @@ class SignupSchema(Schema):
     password = fields.Str(required=True, validate=validate.Length(min=8, max=256))
 
 
+class ForgotPasswordSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    email = fields.Email(required=True)
+
+
+class ResetPasswordSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    token = fields.Str(required=True, validate=validate.Length(min=1, max=256))
+    password = fields.Str(required=True, validate=validate.Length(min=8, max=256))
+
+
+class RecoveryCodeVerifySchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    recovery_code = fields.Str(required=True, validate=validate.Length(min=1, max=64))
+
+
+class RecoveryCodesRegenerateSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    password = fields.Str(required=True, validate=validate.Length(min=1, max=256))
+
+
 class TOTPVerifySchema(Schema):
     """Ready for the 2FA verify-login endpoint referenced in the Tier 3
     spec. NOTE: no /api/2fa/verify-login route exists in this codebase yet

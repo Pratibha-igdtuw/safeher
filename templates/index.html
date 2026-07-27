@@ -337,7 +337,22 @@
         <input id="twoFaDisablePassword" type="password" placeholder="Password to disable" />
         <button id="disable2faBtn" class="btn secondary">Disable 2FA</button>
       </div>
+
+      <div style="margin-top:16px; padding-top:16px; border-top:1px solid rgba(124,58,237,0.14);">
+        <p class="muted">Recovery codes let you log in if you lose your authenticator device. <strong id="recoveryCodesRemaining">—</strong> unused.</p>
+        <div class="row">
+          <input id="recoveryRegenPassword" type="password" placeholder="Password to regenerate" />
+          <button id="regenRecoveryBtn" class="btn secondary">Regenerate codes</button>
+        </div>
+      </div>
     </div>
+
+    <div id="recoveryCodesView" class="hidden" style="margin-top:16px; padding-top:16px; border-top:1px solid rgba(124,58,237,0.14);">
+      <p class="status-line" style="color:#0f9d70;">Save these recovery codes somewhere safe — each works once, and this is the only time they're shown.</p>
+      <ul id="recoveryCodesList" style="list-style:none; font-family:monospace; display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:12px 0;"></ul>
+      <button id="dismissRecoveryCodesBtn" class="btn">I've saved these codes</button>
+    </div>
+
     <p class="card-tags"><span>Stronger security</span><span>Complete protection</span></p>
   </section>
 
@@ -680,7 +695,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
 <!-- FEATURE 4: WebSocket for real-time notifications -->
-<script>window.CURRENT_USER_ID = {{ current_user.id }};</script>
+<script>window.CURRENT_USER_ID = "{{ current_user.id }}";</script>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tilt.js') }}"></script>

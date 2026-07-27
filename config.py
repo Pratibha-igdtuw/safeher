@@ -95,6 +95,21 @@ class Config:
     DEFAULT_ADMIN_EMAIL = os.environ.get("DEFAULT_ADMIN_EMAIL", "admin@123.com")
     DEFAULT_ADMIN_PASSWORD = os.environ.get("DEFAULT_ADMIN_PASSWORD", "123456")
 
+    # --- Account recovery: forgot/reset password (see app.py) -------------
+    # How long a password-reset link stays valid before it's rejected as
+    # expired, even if it was never used.
+    PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = int(os.environ.get("PASSWORD_RESET_TOKEN_EXPIRY_MINUTES", 30))
+
+    # Used to build the link embedded in the reset email (e.g.
+    # "https://safeher.app/reset-password/<token>"). Falls back to
+    # request.url_root at request time if unset, but should be set
+    # explicitly behind a reverse proxy / non-default host.
+    APP_BASE_URL = os.environ.get("APP_BASE_URL", f"http://{HOST}:{PORT}")
+
+    # --- Account recovery: 2FA recovery codes (see app.py) -----------------
+    # How many single-use recovery codes are (re)generated at a time.
+    RECOVERY_CODES_COUNT = int(os.environ.get("RECOVERY_CODES_COUNT", 10))
+
 
 class DevConfig(Config):
     ENV_NAME = "development"

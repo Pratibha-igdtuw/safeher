@@ -31,6 +31,7 @@ import io
 import base64
 import json
 import hashlib
+import secrets
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -52,7 +53,7 @@ import qrcode
 import logging
 from collections import defaultdict
 
-from utils.alerts import send_sos_alert
+from utils.alerts import send_sos_alert, send_email
 from utils.route_safety import (
     get_route_safety_score,
     fetch_osrm_routes,
@@ -85,6 +86,10 @@ from validators import (
     JourneyStartSchema,
     JourneyLocationSchema,
     JourneyExtendSchema,
+    ForgotPasswordSchema,
+    ResetPasswordSchema,
+    RecoveryCodeVerifySchema,
+    RecoveryCodesRegenerateSchema,
 )
 
 from config import get_config
@@ -283,20 +288,53 @@ def handle_unhandled_exception(exc):
 # User model for Flask-Login
 # ---------------------------------------------------------------------------
 class User(UserMixin):
-    def __init__(self, user_id, email, is_admin=False):
+    def __init__(self, user_id, email, is_admin=False, session_version=0):
         self.id = user_id
         self.email = email
         self.is_admin = is_admin
+        # See _enforce_session_version() below: bumped in the DB whenever a
+        # password reset (or a 2FA-recovery-code login) needs to invalidate
+        # every OTHER standing login session for this account.
+        self.session_version = session_version
 
 
 @login_manager.user_loader
 def load_user(user_id):
     conn = get_db()
-    row = conn.execute("SELECT id, email, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, email, is_admin, session_version FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
     conn.close()
     if not row:
         return None
-    return User(row["id"], row["email"], row["is_admin"])
+    return User(row["id"], row["email"], row["is_admin"], row["session_version"])
+
+
+@app.before_request
+def _enforce_session_version():
+    """Account recovery: a password reset (see reset_password()) or a 2FA
+    recovery-code login (see recover_2fa_login()) increments the user's
+    session_version in the DB. Every login cookie issued before that
+    moment was signed with the OLD session_version embedded in it at
+    login time (session["sv"], set in login()/signup()/
+    verify_2fa_login()/recover_2fa_login()); once the two no longer
+    match, that cookie is stale — e.g. it survived a password reset
+    someone triggered from a device an attacker had access to — and gets
+    logged out immediately instead of being trusted for the rest of this
+    request.
+
+    Sessions that predate this feature (no "sv" key yet) are left alone
+    rather than force-logging-out every existing user the moment this
+    ships.
+    """
+    if not current_user.is_authenticated:
+        return
+    expected = session.get("sv")
+    if expected is None:
+        return
+    if current_user.session_version != expected:
+        logout_user()
+        session.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -592,10 +630,46 @@ def init_db():
     if "totp_enabled" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
 
+    # --- Migration: session_version, for invalidating standing login
+    # sessions on password reset / 2FA-recovery-code login (see
+    # _enforce_session_version() above) ---
+    if "session_version" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
+
     # --- Migration: add email column to contacts if missing ---
     contact_cols = {row["name"] for row in conn.execute("PRAGMA table_info(contacts)")}
     if "email" not in contact_cols:
         conn.execute("ALTER TABLE contacts ADD COLUMN email TEXT")
+
+    # --- Account recovery: forgot/reset-password tokens + 2FA recovery codes ---
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+            ON password_reset_tokens(user_id);
+
+        CREATE TABLE IF NOT EXISTS recovery_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recovery_codes_user_id
+            ON recovery_codes(user_id);
+        """
+    )
 
     conn.commit()
     conn.close()
@@ -691,7 +765,8 @@ def login():
 
         conn = get_db()
         user_row = conn.execute(
-            "SELECT id, email, password_hash, is_admin, totp_enabled FROM users WHERE email = ?", (email,)
+            "SELECT id, email, password_hash, is_admin, totp_enabled, session_version FROM users WHERE email = ?",
+            (email,),
         ).fetchone()
         conn.close()
 
@@ -704,8 +779,9 @@ def login():
                 return jsonify({"status": "2fa_required"})
 
             log_successful_login(email, ip)
-            user = User(user_row["id"], user_row["email"], user_row["is_admin"])
+            user = User(user_row["id"], user_row["email"], user_row["is_admin"], user_row["session_version"])
             login_user(user)
+            session["sv"] = user.session_version
             logger.info("Successful login: user=%s", hash_identifier(email))
             return jsonify({"status": "logged_in", "is_admin": user.is_admin})
         else:
@@ -740,8 +816,9 @@ def signup():
         user_id = cur.lastrowid
         conn.close()
 
-        user = User(user_id, email, False)
+        user = User(user_id, email, False, 0)
         login_user(user)
+        session["sv"] = user.session_version
         return jsonify({"status": "signed_up", "is_admin": False})
 
     return render_template("signup.html")
@@ -752,6 +829,131 @@ def signup():
 def logout():
     logout_user()
     return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Account recovery: forgot / reset password
+# ---------------------------------------------------------------------------
+def _hash_token(raw_token):
+    """One-way hash of a password-reset token before it's stored, so a DB
+    read (backup, leak, admin query) never yields a usable token — only
+    the raw value emailed to the user does."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _forgot_password_rate_limit_key():
+    """Same pattern as _login_rate_limit_key: 5 per 15 min per IP+email
+    combination, so one abusive IP can't lock out every other email's
+    ability to request a reset, and one attacker can't hammer a single
+    victim's email from many IPs to spam their inbox either (IP is still
+    part of the key, but per-email review of security logs is possible)."""
+    email = ""
+    try:
+        body = request.get_json(silent=True) or {}
+        email = (body.get("email") or "").strip().lower()
+    except Exception:
+        pass
+    return f"{get_remote_address()}:{email}"
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("5 per 15 minutes", methods=["POST"], key_func=_forgot_password_rate_limit_key)
+@validate_json(ForgotPasswordSchema)
+def forgot_password():
+    if request.method == "POST":
+        data = g.validated_data
+        email = data["email"].strip().lower()
+
+        conn = get_db()
+        user_row = conn.execute("SELECT id, email FROM users WHERE email = ?", (email,)).fetchone()
+
+        if user_row:
+            raw_token = secrets.token_urlsafe(32)
+            expiry_minutes = app.config.get("PASSWORD_RESET_TOKEN_EXPIRY_MINUTES", 30)
+            expires_at = datetime.utcnow() + timedelta(minutes=expiry_minutes)
+
+            conn.execute(
+                "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_row["id"], _hash_token(raw_token), expires_at.isoformat(), datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+
+            base_url = app.config.get("APP_BASE_URL") or request.url_root.rstrip("/")
+            reset_link = f"{base_url}/reset-password/{raw_token}"
+            send_email(
+                user_row["email"],
+                "SafeHer — Reset your password",
+                "We received a request to reset your SafeHer password.\n\n"
+                f"Reset it here (valid for {expiry_minutes} minutes, one-time use):\n{reset_link}\n\n"
+                "If you didn't request this, you can safely ignore this email — your password won't change.",
+            )
+            logger.info("Password reset requested: user=%s", hash_identifier(email))
+        else:
+            # No account with that email — log it (for abuse monitoring)
+            # but still return the identical response below.
+            logger.info("Password reset requested for unknown email: user=%s", hash_identifier(email))
+
+        conn.close()
+        # Always the same response whether or not the account exists, so
+        # this endpoint can't be used to enumerate registered emails.
+        return jsonify({"status": "if_account_exists_email_sent"})
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET"])
+def reset_password_page(token):
+    """Renders the reset form; the actual token is validated server-side
+    only when the form POSTs to /api/reset-password below — this route
+    never looks the token up, so simply visiting the link (e.g. an email
+    client prefetching it) can't burn a single-use token."""
+    return render_template("reset_password.html", token=token)
+
+
+@app.route("/api/reset-password", methods=["POST"])
+@limiter.limit("10 per hour", methods=["POST"])
+@validate_json(ResetPasswordSchema)
+def reset_password():
+    data = g.validated_data
+    raw_token = data["token"]
+    new_password = data["password"]
+    token_hash = _hash_token(raw_token)
+
+    conn = get_db()
+    token_row = conn.execute(
+        "SELECT * FROM password_reset_tokens WHERE token_hash = ?", (token_hash,)
+    ).fetchone()
+
+    if not token_row or token_row["used_at"] is not None:
+        conn.close()
+        if token_row is not None:
+            logger.warning("Password reset token reuse attempt: user_id=%s", token_row["user_id"])
+        return jsonify({"error": "invalid or expired token"}), 400
+
+    if datetime.utcnow() > datetime.fromisoformat(token_row["expires_at"]):
+        conn.close()
+        return jsonify({"error": "invalid or expired token"}), 400
+
+    now_iso = datetime.utcnow().isoformat()
+    conn.execute(
+        "UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ?",
+        (generate_password_hash(new_password), token_row["user_id"]),
+    )
+    # Consume every outstanding reset token for this account (this one,
+    # plus any older still-unused ones from earlier requests) so a second
+    # copy of an older reset email can't still be used afterward.
+    conn.execute(
+        "UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL",
+        (now_iso, token_row["user_id"]),
+    )
+    conn.commit()
+
+    user_email_row = conn.execute("SELECT email FROM users WHERE id = ?", (token_row["user_id"],)).fetchone()
+    conn.close()
+
+    logger.info("Password reset completed: user=%s", hash_identifier(user_email_row["email"] if user_email_row else None))
+    return jsonify({"status": "password_reset"})
 
 
 # ---------------------------------------------------------------------------
@@ -817,10 +1019,15 @@ def enable_2fa_confirm():
         return jsonify({"error": "invalid code"}), 401
 
     conn.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (current_user.id,))
+    # Generate the recovery-code batch at the same moment 2FA actually
+    # turns on, so a user is never left with 2FA enabled and zero recovery
+    # options — this is the only response that ever shows the codes in
+    # plaintext (see _generate_recovery_codes docstring).
+    recovery_codes = _generate_recovery_codes(conn, current_user.id)
     conn.commit()
     conn.close()
     logger.info("2FA enabled: user=%s", hash_identifier(current_user.email))
-    return jsonify({"status": "2fa_enabled"})
+    return jsonify({"status": "2fa_enabled", "recovery_codes": recovery_codes})
 
 
 @app.route("/api/2fa/disable", methods=["POST"])
@@ -842,6 +1049,11 @@ def disable_2fa():
         return jsonify({"error": "2FA is mandatory for admin accounts and cannot be disabled"}), 403
 
     conn.execute("UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?", (current_user.id,))
+    # Recovery codes only exist to recover a 2FA-enabled account — once
+    # 2FA itself is off, leftover codes from this enrollment are dead
+    # weight (and would otherwise still "work" if 2FA got re-enabled with
+    # a fresh secret but the old codes were never cleared).
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (current_user.id,))
     conn.commit()
     conn.close()
     return jsonify({"status": "2fa_disabled"})
@@ -859,7 +1071,7 @@ def verify_2fa_login():
 
     conn = get_db()
     user_row = conn.execute(
-        "SELECT id, email, is_admin, totp_secret FROM users WHERE id = ?", (pending_user_id,)
+        "SELECT id, email, is_admin, totp_secret, session_version FROM users WHERE id = ?", (pending_user_id,)
     ).fetchone()
     conn.close()
 
@@ -874,9 +1086,172 @@ def verify_2fa_login():
 
     session.pop("pending_2fa_user_id", None)
     logger.info("Successful 2FA login: user=%s", hash_identifier(user_row["email"]))
-    user = User(user_row["id"], user_row["email"], user_row["is_admin"])
+    user = User(user_row["id"], user_row["email"], user_row["is_admin"], user_row["session_version"])
     login_user(user)
+    session["sv"] = user.session_version
     return jsonify({"status": "logged_in", "is_admin": user.is_admin})
+
+
+# ---------------------------------------------------------------------------
+# TIER 2 FEATURE: 2FA recovery codes
+# ---------------------------------------------------------------------------
+def _generate_recovery_codes(conn, user_id, count=None):
+    """(Re)generate single-use recovery codes for user_id.
+
+    Deletes any existing codes first (used or not) — a "regenerate" call
+    invalidates the whole old batch, matching how recovery codes work on
+    every mainstream 2FA implementation (you can't have two live batches
+    at once). Returns the plaintext codes; only the werkzeug-hashed form
+    is persisted, so this is the only time the caller sees them.
+    """
+    count = count or app.config.get("RECOVERY_CODES_COUNT", 10)
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+
+    now = datetime.utcnow().isoformat()
+    plaintext_codes = []
+    for _ in range(count):
+        raw = secrets.token_hex(4).upper()  # 8 hex chars, 32 bits
+        code = f"{raw[:4]}-{raw[4:]}"        # e.g. "A1B2-C3D4"
+        plaintext_codes.append(code)
+        conn.execute(
+            "INSERT INTO recovery_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)",
+            (user_id, generate_password_hash(code), now),
+        )
+    return plaintext_codes
+
+
+@app.route("/api/2fa/recovery-codes/status", methods=["GET"])
+@login_required
+def recovery_codes_status():
+    conn = get_db()
+    remaining = conn.execute(
+        "SELECT COUNT(*) as count FROM recovery_codes WHERE user_id = ? AND used_at IS NULL",
+        (current_user.id,),
+    ).fetchone()["count"]
+    conn.close()
+    return jsonify({"remaining": remaining})
+
+
+@app.route("/api/2fa/recovery-codes/regenerate", methods=["POST"])
+@login_required
+@validate_json(RecoveryCodesRegenerateSchema)
+def regenerate_recovery_codes():
+    """Requires the current password (same guard as /api/2fa/disable) so a
+    hijacked-but-not-fully-authenticated session (e.g. someone at an
+    unlocked laptop) can't mint a fresh batch of account-recovery codes
+    for themselves."""
+    data = g.validated_data
+    password = data["password"]
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT password_hash, totp_enabled FROM users WHERE id = ?", (current_user.id,)
+    ).fetchone()
+
+    if not row or not check_password_hash(row["password_hash"], password):
+        conn.close()
+        logger.warning(
+            "Failed recovery-code regeneration (wrong password): user=%s", hash_identifier(current_user.email)
+        )
+        return jsonify({"error": "incorrect password"}), 401
+
+    if not row["totp_enabled"]:
+        conn.close()
+        return jsonify({"error": "2FA is not enabled on this account"}), 400
+
+    codes = _generate_recovery_codes(conn, current_user.id)
+    conn.commit()
+    conn.close()
+    logger.info("Recovery codes regenerated: user=%s", hash_identifier(current_user.email))
+    return jsonify({"recovery_codes": codes})
+
+
+def _pending_2fa_rate_limit_key():
+    """Per-pending-login + IP key so recovery-code brute-forcing can't be
+    spread across the rate limit by rotating which (as-yet-unauthenticated)
+    account is being attacked from the same IP."""
+    return f"{get_remote_address()}:{session.get('pending_2fa_user_id', 'anon')}"
+
+
+@app.route("/api/2fa/recover", methods=["POST"])
+@limiter.limit("10 per 15 minutes", methods=["POST"], key_func=_pending_2fa_rate_limit_key)
+@validate_json(RecoveryCodeVerifySchema)
+def recover_2fa_login():
+    """Alternate second login step for someone who has lost their
+    authenticator device: consumes ONE single-use recovery code instead of
+    a TOTP code.
+
+    Losing the authenticator means the existing 2FA setup can't be trusted
+    going forward (the user can no longer prove they still hold the
+    secret), so this both logs the user in AND disables 2FA on the
+    account — clearing the TOTP secret and every remaining recovery code
+    so they re-enroll fresh, exactly like calling /api/2fa/disable would,
+    rather than leaving 2FA "on" with a secret nobody can generate codes
+    from anymore. Also bumps session_version so any other standing
+    sessions get logged out, the same defense-in-depth applied to a
+    password reset.
+    """
+    pending_user_id = session.get("pending_2fa_user_id")
+    if not pending_user_id:
+        return jsonify({"error": "no pending 2FA login"}), 400
+
+    data = g.validated_data
+    supplied_code = data["recovery_code"].strip().upper()
+
+    conn = get_db()
+    user_row = conn.execute(
+        "SELECT id, email, is_admin, totp_secret, session_version FROM users WHERE id = ?",
+        (pending_user_id,),
+    ).fetchone()
+
+    if not user_row or not user_row["totp_secret"]:
+        conn.close()
+        session.pop("pending_2fa_user_id", None)
+        return jsonify({"error": "2FA not configured for this account"}), 400
+
+    if user_row["is_admin"]:
+        # Mirrors /api/2fa/disable: 2FA is mandatory for admin accounts, so
+        # recovery-code login can't be used to strip it off an admin.
+        conn.close()
+        return jsonify({"error": "2FA is mandatory for admin accounts and cannot be disabled"}), 403
+
+    unused_codes = conn.execute(
+        "SELECT id, code_hash FROM recovery_codes WHERE user_id = ? AND used_at IS NULL",
+        (pending_user_id,),
+    ).fetchall()
+
+    matched_code_id = None
+    for code_row in unused_codes:
+        if check_password_hash(code_row["code_hash"], supplied_code):
+            matched_code_id = code_row["id"]
+            break
+
+    if matched_code_id is None:
+        conn.close()
+        logger.warning("Invalid 2FA recovery code attempt: user=%s", hash_identifier(user_row["email"]))
+        return jsonify({"error": "invalid or already-used recovery code"}), 401
+
+    conn.execute(
+        "UPDATE recovery_codes SET used_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), matched_code_id),
+    )
+
+    new_session_version = user_row["session_version"] + 1
+    conn.execute(
+        "UPDATE users SET totp_enabled = 0, totp_secret = NULL, session_version = ? WHERE id = ?",
+        (new_session_version, pending_user_id),
+    )
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (pending_user_id,))
+    conn.commit()
+    conn.close()
+
+    session.pop("pending_2fa_user_id", None)
+    logger.info("2FA recovery-code login used, 2FA disabled: user=%s", hash_identifier(user_row["email"]))
+
+    user = User(user_row["id"], user_row["email"], user_row["is_admin"], new_session_version)
+    login_user(user)
+    session["sv"] = new_session_version
+    return jsonify({"status": "logged_in", "is_admin": user.is_admin, "2fa_disabled": True})
 
 
 # ---------------------------------------------------------------------------
