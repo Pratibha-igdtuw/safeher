@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from functools import lru_cache
 from typing import Optional
 
@@ -61,22 +62,51 @@ class RiskPredictor:
     """Wraps a trained RandomForestRegressor. Falls back to the original
     geofence heuristic if no trained model file is present, so the app
     still runs correctly before `scripts/train_risk_model.py` has ever
-    been executed."""
+    been executed.
+
+    Loading the pickled model (`joblib.load`) is the expensive part —
+    unpickling a 200-tree RandomForestRegressor measured at ~1.5-2s on a
+    typical dev machine. `_load()` is lazy (only runs on first real use)
+    and memoized (`_load_attempted`), so that cost is paid at most once
+    per process — but *which* request pays it matters: left alone, it's
+    whichever HTTP request happens to call `predict()` first, which in
+    practice is the Safety Score widget on the very first dashboard load
+    after every server restart. `warm_up()` lets app.py pay that cost in
+    a background thread right after startup instead, so real requests
+    never wait on it.
+    """
 
     def __init__(self, model_path: str = MODEL_PATH):
         self.model_path = model_path
         self._model = None
         self._feature_names = FEATURE_NAMES
         self._load_attempted = False
+        self._load_lock = threading.Lock()
 
     def _load(self):
         if self._load_attempted:
             return
-        self._load_attempted = True
-        if os.path.exists(self.model_path):
-            bundle = joblib.load(self.model_path)
-            self._model = bundle["model"]
-            self._feature_names = bundle.get("feature_names", FEATURE_NAMES)
+        with self._load_lock:
+            # Re-check inside the lock: another thread (e.g. the startup
+            # warm-up thread racing a real incoming request) may have
+            # already finished loading while we were waiting for it.
+            if self._load_attempted:
+                return
+            self._load_attempted = True
+            if os.path.exists(self.model_path):
+                bundle = joblib.load(self.model_path)
+                self._model = bundle["model"]
+                self._feature_names = bundle.get("feature_names", FEATURE_NAMES)
+
+    def warm_up(self):
+        """Force the model to load now, synchronously. Intended to be
+        called from a background thread at server startup (see
+        app.py's `if __name__ == "__main__":` block) so the ~1-2s
+        unpickling cost happens before the first real request instead of
+        blocking it. Safe to call more than once / concurrently with a
+        real request — `_load()`'s lock + memoization make it a no-op
+        after the first successful load."""
+        self._load()
 
     @property
     def is_model_loaded(self) -> bool:

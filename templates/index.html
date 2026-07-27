@@ -13,14 +13,17 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-<!-- FEATURE 4: WebSocket for real-time notifications -->
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<!-- TIER 1 FEATURE 1: TensorFlow.js — used client-side only to capture mic
-     audio and compute a log-mel spectrogram; the actual YAMNet inference
-     runs server-side in /api/audio-classify (see static/js/main.js and
-     utils/audio_classifier.py). Loaded lazily; main.js works fine (via the
-     transcript-keyword path) even if this CDN is unreachable. -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<!-- Performance note: external <script> tags for socket.io/leaflet/lucide
+     live at the end of <body> (just before main.js, which needs them),
+     not here. A <script> in <head> without defer/async blocks HTML
+     parsing until it loads — if a CDN is slow or unreachable that stalls
+     first paint for the browser's full connection-timeout duration. The
+     socket.io tag that used to be duplicated here has been removed (it's
+     loaded once, correctly, below); TensorFlow.js has been removed
+     entirely — it was never actually used anywhere in this codebase (the
+     audio-distress pipeline computes its spectrogram with a small
+     hand-rolled FFT in static/js/main.js, not tf.js), so it was pure
+     multi-hundred-KB dead weight on every single page load. -->
 </head>
 <body>
 
@@ -362,9 +365,52 @@
 <main id="tab-map" class="tab-panel hidden">
   <div class="map-layout">
 
-    <div class="map-side card">
+    <div class="map-side card" id="mapInfoPanel">
       <h2>Safety Score Map</h2>
-      <p class="muted" id="mapModeHint">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits.</p>
+      <p class="muted" id="mapModeHint">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits. Press and hold to report an issue instead.</p>
+
+      <!-- Live status strip — Safety Score / Weather / Nearest services / Guardian & -->
+      <!-- Journey status / device signals. Populated by safety-map.js; every value -->
+      <!-- comes from a real source (device APIs, existing endpoints, or Open-Meteo) -->
+      <!-- except weather, which needs no key and is fetched client-side. -->
+      <div class="map-status-grid" id="mapStatusGrid" aria-live="polite">
+        <div class="map-status-cell">
+          <span class="map-status-label">Area Safety</span>
+          <span class="map-status-value" id="statSafetyScore">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Weather</span>
+          <span class="map-status-value" id="statWeather">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Nearest Police</span>
+          <span class="map-status-value" id="statNearestPolice">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Nearest Hospital</span>
+          <span class="map-status-value" id="statNearestHospital">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Guardian</span>
+          <span class="map-status-value" id="statGuardian">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Journey</span>
+          <span class="map-status-value" id="statJourney">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Battery</span>
+          <span class="map-status-value" id="statBattery">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">Network</span>
+          <span class="map-status-value" id="statNetwork">—</span>
+        </div>
+        <div class="map-status-cell">
+          <span class="map-status-label">GPS Accuracy</span>
+          <span class="map-status-value" id="statAccuracy">—</span>
+        </div>
+      </div>
 
       <div class="legend">
         <span><i class="dot green"></i> Safe (75+)</span>
@@ -377,12 +423,30 @@
         <button id="mapModeRouteBtn" class="btn map-mode-btn secondary">🧭 Route Mode</button>
       </div>
 
-      <div class="row" style="margin-top:8px; flex-wrap:wrap;">
-        <button id="layerRiskZonesBtn" class="btn map-layer-btn secondary">⬤ Risk Zones</button>
-        <button id="layerServicesBtn" class="btn map-layer-btn secondary">🏥 Nearby Help</button>
-      </div>
+      <h3 class="map-section-title">Favourite Places</h3>
+      <p class="muted" style="font-size:11px; margin:2px 0 8px;">Tap an unsaved slot to save the map's current center. Tap a saved one to jump there.</p>
+      <div class="map-favorites-row" id="mapFavoritesRow"></div>
 
+      <h3 class="map-section-title">Safety Layers</h3>
+      <p class="muted" style="font-size:11px; margin:2px 0 8px;">Toggle as many as you like — they layer on top of each other.</p>
+      <div class="map-layers-grid" id="mapLayersGrid">
+        <button class="btn map-layer-btn secondary" data-layer="heatmap">🌡️ Risk Heatmap</button>
+        <button class="btn map-layer-btn secondary" data-layer="police">🚓 Police</button>
+        <button class="btn map-layer-btn secondary" data-layer="hospital">🏥 Hospitals</button>
+        <button class="btn map-layer-btn secondary" data-layer="pharmacy">💊 Pharmacies</button>
+        <button class="btn map-layer-btn secondary" data-layer="lighting">💡 Street Lighting</button>
+        <button class="btn map-layer-btn secondary" data-layer="womens_safety">🧕 Women's Safety Reports</button>
+        <button class="btn map-layer-btn secondary" data-layer="safe_zones">🟢 Safe Zones</button>
+        <button class="btn map-layer-btn secondary" data-layer="community_reports">⚠️ Community Reports</button>
+        <button class="btn map-layer-btn secondary" data-layer="crime">🚨 Crime Reports</button>
+        <button class="btn map-layer-btn secondary" data-layer="traffic">🚦 Traffic</button>
+      </div>
       <p id="crowdDensityBadge" class="status-line hidden"></p>
+      <div id="mapHeatmapLegend" class="map-heatmap-legend hidden">
+        <span><i class="dot green"></i> Safe</span>
+        <span><i class="dot orange"></i> Moderate risk</span>
+        <span><i class="dot red"></i> High risk</span>
+      </div>
 
       <!-- Route Mode panel -->
       <div id="routeModePanel" class="hidden" style="margin-top:14px;">
@@ -391,13 +455,69 @@
         <div id="routeResult" class="route-result"></div>
         <div id="routeComparePanel"></div>
       </div>
+
+      <h3 class="map-section-title">Nearby Services</h3>
+      <div class="row" style="flex-wrap:wrap; gap:6px; margin-bottom:8px;" id="mapNearbyFilterRow">
+        <button class="btn map-nearby-filter-btn active" data-type="">All</button>
+        <button class="btn map-nearby-filter-btn" data-type="police">Police</button>
+        <button class="btn map-nearby-filter-btn" data-type="hospital">Hospital</button>
+        <button class="btn map-nearby-filter-btn" data-type="pharmacy">Pharmacy</button>
+        <button class="btn map-nearby-filter-btn" data-type="helpline">Women's Help Desk</button>
+        <button class="btn map-nearby-filter-btn" data-type="metro">Metro</button>
+        <button class="btn map-nearby-filter-btn" data-type="shelter">Safe Shelter</button>
+        <button class="btn map-nearby-filter-btn" data-type="toilet">Public Toilet</button>
+        <button class="btn map-nearby-filter-btn" data-type="cab_stand">Safe Cab Stand</button>
+      </div>
+      <div id="mapNearbyEmptyState" class="hub-empty-state hidden">
+        <span class="hub-empty-state-icon" aria-hidden="true">📍</span>
+        <p>Enable location to discover the nearest police stations, hospitals, pharmacies and safe shelters — sorted by actual distance, not a fixed list.</p>
+        <button id="mapEnableLocationBtn" class="btn safe-btn">Enable Location</button>
+      </div>
+      <ul id="mapNearbyList" class="map-nearby-list" aria-live="polite">
+        <li class="skeleton-item"></li>
+        <li class="skeleton-item"></li>
+      </ul>
     </div>
 
     <div class="map-wrap">
+      <div class="map-search-bar">
+        <span class="map-search-icon" aria-hidden="true">🔍</span>
+        <input id="mapSearchInput" type="text" placeholder="Search address, landmark, college, metro, hospital…" autocomplete="off" aria-label="Search a location on the map" />
+        <button id="mapSearchClearBtn" class="map-search-clear hidden" type="button" aria-label="Clear search">✕</button>
+        <ul id="mapSearchSuggestions" class="map-search-suggestions hidden" role="listbox"></ul>
+      </div>
+
+      <button id="mapMyLocationBtn" class="map-my-location-btn" type="button" aria-label="Center map on my current location" title="My Location">📍</button>
+
       <div id="leafletMap"></div>
+
+      <!-- Journey info card — shown/updated live only while Journey Mode is active -->
+      <div id="mapJourneyCard" class="map-journey-card hidden"></div>
     </div>
   </div>
 </main>
+
+<!-- QUICK MAP REPORT MODAL (long-press to report an issue) -->
+<div id="mapReportModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <h2>Report an Issue</h2>
+    <p class="muted">Flag something for other SafeHer users at this spot. Reports are shown anonymously.</p>
+    <div class="report-category-grid" id="reportCategoryGrid">
+      <button type="button" class="report-category-chip" data-category="poor_lighting">💡 Poor lighting</button>
+      <button type="button" class="report-category-chip" data-category="harassment">🚫 Harassment</button>
+      <button type="button" class="report-category-chip" data-category="suspicious_activity">👀 Suspicious activity</button>
+      <button type="button" class="report-category-chip" data-category="road_blocked">🚧 Road blocked</button>
+      <button type="button" class="report-category-chip" data-category="unsafe_street">⚠️ Unsafe street</button>
+      <button type="button" class="report-category-chip" data-category="broken_cctv">📹 Broken CCTV</button>
+      <button type="button" class="report-category-chip" data-category="isolated_area">🌑 Isolated area</button>
+    </div>
+    <textarea id="reportNote" placeholder="Anything else to add? (optional)"></textarea>
+    <div class="row">
+      <button id="submitReportBtn" class="btn safe-btn" disabled>Submit Report</button>
+      <button id="cancelReportBtn" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <!-- AUDIT MODAL -->
 <div id="auditModal" class="modal-overlay hidden">
@@ -471,6 +591,7 @@
       <button class="btn filter-btn" data-type="hospital">🏥 Hospital</button>
       <button class="btn filter-btn" data-type="pharmacy">💊 Pharmacy</button>
       <button class="btn filter-btn" data-type="helpline">📞 Women Helpline</button>
+      <button class="btn filter-btn" data-type="cyber">🛡️ Cyber Crime</button>
       <button class="btn filter-btn" data-type="shelter">🏠 Shelters</button>
       <button class="btn filter-btn" data-type="ngo">🤝 NGOs</button>
       <button class="btn filter-btn" data-type="contacts">👥 Emergency Contacts</button>
@@ -486,7 +607,7 @@
       <p>Enable your location to discover nearby emergency services.</p>
       <button id="hubEnableLocationBtn" class="btn safe-btn">Enable Location</button>
     </div>
-    <ul id="servicesList" class="services-list">
+    <ul id="servicesList" class="services-list" aria-live="polite">
       <li class="skeleton-item"></li>
       <li class="skeleton-item"></li>
       <li class="skeleton-item"></li>
@@ -497,7 +618,7 @@
   <section class="card" id="hubContactsSection">
     <h2>Emergency Contacts</h2>
     <p class="muted">Your trusted contacts, one tap away.</p>
-    <ul id="hubContactsList" class="hub-contacts-list"></ul>
+    <ul id="hubContactsList" class="hub-contacts-list" aria-live="polite"></ul>
     <div id="hubContactsEmptyState" class="hub-empty-state hidden">
       <span class="hub-empty-state-icon" aria-hidden="true">❤️</span>
       <p>You haven't added any emergency contacts yet.</p>
@@ -508,8 +629,8 @@
   <!-- ===================== NATIONAL HELPLINES ===================== -->
   <section class="card">
     <h2>National Emergency Helplines (India)</h2>
-    <p class="muted">Tap any number to call it directly — no need to dial manually.</p>
-    <ul id="emergencyHelplinesList" class="hub-helpline-grid"></ul>
+    <p class="muted">Tap any number to call it directly, or copy it to share with someone else.</p>
+    <ul id="emergencyHelplinesList" class="hub-helpline-grid" aria-live="polite"></ul>
   </section>
 </main>
 
@@ -594,6 +715,14 @@
           <div class="guardian-stat">
             <span class="guardian-stat-label">Journey</span>
             <span class="guardian-stat-value" id="gdJourneyStatus">No active journey</span>
+          </div>
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Network</span>
+            <span class="guardian-stat-value" id="gdNetworkStatus">—</span>
+          </div>
+          <div class="guardian-stat">
+            <span class="guardian-stat-label">Location Accuracy</span>
+            <span class="guardian-stat-value" id="gdLocationAccuracy">—</span>
           </div>
         </div>
         <div class="progress-track" id="gdJourneyProgressTrack" style="display:none;">
@@ -685,12 +814,21 @@
   </div>
 </div>
 
-<!-- Floating Quick-SOS: additive shortcut, forwards to the real #sosBtn below
-     (see PPT reference: "SOS — Always on, bottom right"). Doesn't move or
-     duplicate the original SOS card's position or logic. -->
-<button id="quickSosBtn" class="quick-sos-btn" type="button" aria-label="Emergency SOS" title="Emergency SOS">
+<!-- Floating Quick-SOS FAB: tap expands a speed-dial of quick actions (SOS
+     is the first one, so it's still just one more tap away); press-and-hold
+     drags the button itself. Doesn't duplicate the original SOS card's
+     logic — every action forwards to the real control it represents. -->
+<button id="quickSosBtn" class="quick-sos-btn" type="button" aria-label="Emergency quick actions. Tap to open, press and hold to move." title="Tap for quick actions — press &amp; hold to move" aria-haspopup="true" aria-expanded="false">
   <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a5 5 0 0 0-5 5v3a7 7 0 0 0-2 5v2h18v-2a7 7 0 0 0-2-5V7a5 5 0 0 0-5-5z"/><path d="M9 20a3 3 0 0 0 6 0"/></svg>
 </button>
+<div id="sosFabMenu" class="sos-fab-menu" aria-hidden="true" role="menu">
+  <button type="button" class="sos-fab-item sos-fab-item-danger" data-fab-action="sos" role="menuitem"><span aria-hidden="true">🚨</span> SOS</button>
+  <button type="button" class="sos-fab-item" data-fab-action="journey" role="menuitem"><span aria-hidden="true">🧭</span> Start Journey</button>
+  <button type="button" class="sos-fab-item" data-fab-action="guardian" role="menuitem"><span aria-hidden="true">📞</span> Call Guardian</button>
+  <button type="button" class="sos-fab-item" data-fab-action="assistant" role="menuitem"><span aria-hidden="true">🤖</span> AI Assistant</button>
+  <button type="button" class="sos-fab-item" data-fab-action="report" role="menuitem"><span aria-hidden="true">⚠️</span> Report Incident</button>
+  <button type="button" class="sos-fab-item" data-fab-action="share" role="menuitem"><span aria-hidden="true">📍</span> Share Live Location</button>
+</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
@@ -698,6 +836,7 @@
 <script>window.CURRENT_USER_ID = "{{ current_user.id }}";</script>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/safety-map.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
 <script src="{{ url_for('static', filename='js/scroll-reveal.js') }}"></script>
 <script src="{{ url_for('static', filename='js/premium-enhancements.js') }}"></script>

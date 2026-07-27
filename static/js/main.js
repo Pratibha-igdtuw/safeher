@@ -1785,8 +1785,6 @@ const mapModeRouteBtn = document.getElementById("mapModeRouteBtn");
 const routeModePanel = document.getElementById("routeModePanel");
 const mapModeHint = document.getElementById("mapModeHint");
 const resetRouteBtn = document.getElementById("resetRouteBtn");
-const layerRiskZonesBtn = document.getElementById("layerRiskZonesBtn");
-const layerServicesBtn = document.getElementById("layerServicesBtn");
 const crowdDensityBadge = document.getElementById("crowdDensityBadge");
 const routeComparePanel = document.getElementById("routeComparePanel");
 
@@ -1800,7 +1798,7 @@ function setMapMode(mode) {
   routeModePanel.classList.toggle("hidden", mode !== "route");
   mapModeHint.textContent =
     mode === "audit"
-      ? "Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits."
+      ? "Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits. Press and hold to report an issue instead."
       : "Tap the map to set your origin, then tap again to set your destination.";
 }
 
@@ -1816,26 +1814,14 @@ function clearRoute() {
   routeComparePanel.innerHTML = "";
 }
 
-layerRiskZonesBtn.addEventListener("click", () => {
-  showRiskZones = !showRiskZones;
-  layerRiskZonesBtn.classList.toggle("active", showRiskZones);
-  if (showRiskZones) refreshMapLayers();
-  else {
-    riskZoneLayers.forEach((l) => leafletMap.removeLayer(l));
-    riskZoneLayers = [];
-    crowdDensityBadge.classList.add("hidden");
-  }
-});
-
-layerServicesBtn.addEventListener("click", () => {
-  showServices = !showServices;
-  layerServicesBtn.classList.toggle("active", showServices);
-  if (showServices) refreshServiceLayer();
-  else {
-    serviceLayers.forEach((l) => leafletMap.removeLayer(l));
-    serviceLayers = [];
-  }
-});
+// NOTE: the Risk-Zones and Nearby-Help layer *toggle buttons* used to live
+// right here (#layerRiskZonesBtn / #layerServicesBtn). The Safety Map's
+// left panel now has a fuller "Safety Layers" grid (heatmap, police,
+// hospital, pharmacy, lighting, women's safety, safe zones, community
+// reports, crime, traffic) — see initSafetyLayers() in safety-map.js,
+// which toggles these same `showRiskZones` / `showServices` flags and
+// calls the same refreshMapLayers() / refreshServiceLayer() functions
+// below, just from the new buttons instead of the old two.
 
 async function refreshMapLayers() {
   if (!leafletMap || !showRiskZones) return;
@@ -1863,7 +1849,7 @@ async function refreshMapLayers() {
   crowdDensityBadge.classList.remove("hidden");
 }
 
-const SERVICE_ICONS = { police: "🚓", hospital: "🏥", pharmacy: "💊", helpline: "📞" };
+const SERVICE_ICONS = { police: "🚓", hospital: "🏥", pharmacy: "💊", helpline: "📞", metro: "🚇", toilet: "🚻", shelter: "🏠", cab_stand: "🚕" };
 
 async function refreshServiceLayer() {
   if (!leafletMap || !showServices) return;
@@ -1908,34 +1894,71 @@ async function compareRoutes() {
   routeLines.forEach((l) => leafletMap.removeLayer(l));
   routeLines = [];
 
-  const routes = result.routes || [];
-  routeResult.innerHTML = routes.length
-    ? `<strong>${routes.length > 1 ? "Route Comparison" : "Route Safety"}</strong><br/><span class="muted" style="font-size:11px;">${escapeHtml(result.note || "")}</span>`
+  const rawRoutes = result.routes || [];
+  routeResult.innerHTML = rawRoutes.length
+    ? `<strong>${rawRoutes.length > 1 ? "Route Comparison" : "Route Safety"}</strong><br/><span class="muted" style="font-size:11px;">${escapeHtml(result.note || "")}</span>`
     : "No route data available.";
 
+  // Reclassify into Safest / Fastest / Balanced rather than the backend's
+  // generic "Fastest Route" / "Alternative Route" labels. With only 1 or 2
+  // routes actually returned by OSRM we show only that many cards, labeled
+  // honestly (never inventing a third route that doesn't exist).
+  const routes = classifyRoutesBySafetyProfile(rawRoutes);
+
+  const riskLevel = (score) => (score >= 75 ? "Low risk" : score >= 45 ? "Moderate risk" : "High risk");
+
   routeComparePanel.innerHTML = routes
-    .map((r, i) => {
+    .map((r) => {
       const color = scoreColor(r.score);
       return `<div class="route-card" style="border-left:4px solid ${color};">
-        <strong>${escapeHtml(r.label)}</strong>
+        <strong>${r.profileIcon} ${escapeHtml(r.profileLabel)}</strong>
         <p style="margin:4px 0; font-size:12px;" class="muted">
-          ${r.distance_km} km${r.duration_min != null ? " · " + Math.round(r.duration_min) + " min" : ""}
+          ${r.distance_km} km${r.duration_min != null ? " · " + Math.round(r.duration_min) + " min ETA" : ""}
         </p>
         <p style="margin:0;"><span style="color:${color}; font-weight:700;">${r.score}/100 — ${escapeHtml(r.rating)}</span></p>
-        <p style="margin:4px 0 0; font-size:11px;" class="muted">⚠️ ${r.risk_zones_crossed} risk zone(s) along this path</p>
+        <p style="margin:4px 0 0; font-size:11px;" class="muted">${riskLevel(r.score)} · ⚠️ ${r.risk_zones_crossed} risk zone(s) along this path</p>
       </div>`;
     })
     .join("");
 
   routes.forEach((r) => {
     if (!r.geometry || r.geometry.length < 2) return;
-    const line = L.polyline(r.geometry, { color: scoreColor(r.score), weight: 4, opacity: 0.75 }).addTo(leafletMap);
+    const line = L.polyline(r.geometry, { color: scoreColor(r.score), weight: 4, opacity: 0.75, className: "route-line-animated" }).addTo(leafletMap);
     routeLines.push(line);
   });
   if (routes.length) {
     const bounds = L.latLngBounds(routes.flatMap((r) => r.geometry || []));
-    if (bounds.isValid()) leafletMap.fitBounds(bounds, { padding: [30, 30] });
+    if (bounds.isValid()) leafletMap.flyToBounds(bounds, { padding: [30, 30], duration: 0.8 });
   }
+}
+
+// Takes whatever routes OSRM actually returned (1-2, typically) and labels
+// them Safest / Fastest / Balanced based on their real scores and
+// durations — never fabricates a route that doesn't exist. With a single
+// route there's nothing to compare, so it's labeled "Recommended Route"
+// instead of arbitrarily picking one of the three names.
+function classifyRoutesBySafetyProfile(rawRoutes) {
+  if (!rawRoutes.length) return [];
+  if (rawRoutes.length === 1) {
+    return [{ ...rawRoutes[0], profileIcon: "🧭", profileLabel: "Recommended Route" }];
+  }
+
+  const bySafety = [...rawRoutes].sort((a, b) => b.score - a.score);
+  const byDuration = [...rawRoutes].sort((a, b) => (a.duration_min ?? Infinity) - (b.duration_min ?? Infinity));
+  const safest = bySafety[0];
+  const fastest = byDuration[0];
+
+  const labeled = [{ ...safest, profileIcon: "🟢", profileLabel: "Safest Route" }];
+  if (fastest !== safest) {
+    labeled.push({ ...fastest, profileIcon: "⚡", profileLabel: "Fastest Route" });
+  }
+  // A genuine third/"balanced" option only exists if there are more than 2
+  // distinct routes; with exactly 2 we're honest that it's a two-way choice.
+  const remaining = rawRoutes.filter((r) => r !== safest && r !== fastest);
+  if (remaining.length) {
+    labeled.push({ ...remaining[0], profileIcon: "⚖️", profileLabel: "Balanced Route" });
+  }
+  return labeled;
 }
 
 function initMap() {
@@ -1955,7 +1978,17 @@ function initMap() {
     maxZoom: 19,
   }).addTo(leafletMap);
 
+  // Set to true by safety-map.js's long-press handler right before it opens
+  // the quick "Report an Issue" modal, so this ordinary click handler (which
+  // Leaflet still fires on pointerup) doesn't also drop an audit marker /
+  // open the full audit modal for the same press.
+  window.__mapLongPressHandled = false;
+
   leafletMap.on("click", (e) => {
+    if (window.__mapLongPressHandled) {
+      window.__mapLongPressHandled = false;
+      return;
+    }
     if (mapMode === "route") {
       handleRouteModeClick(e.latlng);
       return;
@@ -2080,12 +2113,13 @@ setTimeout(initMap, 100);
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // National Emergency Helplines (India) — static, click-to-call.
-// `category` lines these up with the filter chips below. Two chips
-// ("Shelters", "NGOs") don't correspond to a real amenity type the backend
-// queries (/api/nearby-services only covers police/hospital/pharmacy, per
-// OSM_AMENITY_MAP in app.py) — rather than invent fake nearby listings for
-// them, they surface the genuinely-relevant entries from this list instead
-// (e.g. the National Commission for Women is a real NGO helpline).
+// `category` lines these up with the filter chips below. Three chips
+// ("Shelters", "NGOs", "Cyber Crime") don't correspond to a real amenity
+// type the backend queries (/api/nearby-services only covers
+// police/hospital/pharmacy, per OSM_AMENITY_MAP in app.py) — rather than
+// invent fake nearby listings for them, they surface the genuinely-relevant
+// entries from this list instead (e.g. the National Commission for Women is
+// a real NGO helpline, and Cyber Crime routes to the 1930 helpline).
 // ---------------------------------------------------------------------------
 const INDIA_EMERGENCY_NUMBERS = [
   { name: "All-in-One Emergency", number: "112", category: "police", description: "Police • Fire • Ambulance" },
@@ -2096,11 +2130,26 @@ const INDIA_EMERGENCY_NUMBERS = [
   { name: "Fire", number: "101", category: "police", description: "Fire emergency" },
   { name: "Child Helpline", number: "1098", category: "shelter", description: "Child protection & shelter referrals" },
   { name: "National Commission for Women", number: "7827170170", category: "ngo", description: "Complaints, referrals, legal guidance" },
-  { name: "Cyber Crime Helpline", number: "1930", category: "helpline", description: "Report online harassment or fraud" },
+  { name: "Cyber Crime Helpline", number: "1930", category: "cyber", description: "Report online harassment or fraud" },
   { name: "Disaster Management", number: "108", category: "hospital", description: "Emergency response & rescue" },
 ];
 
-const HELPLINE_ICONS = { police: "🚨", hospital: "🚑", helpline: "📞", shelter: "🏠", ngo: "🤝" };
+const HELPLINE_ICONS = { police: "🚨", hospital: "🚑", helpline: "📞", shelter: "🏠", ngo: "🤝", cyber: "🛡️" };
+
+// ---------------------------------------------------------------------------
+// Search term highlighting — wraps the matched substring in <mark> so results
+// are easy to scan. Always escapes first, then re-inserts <mark> around the
+// match, so this can never introduce unescaped HTML from user-typed search
+// terms or service data.
+// ---------------------------------------------------------------------------
+function highlightMatch(value, term) {
+  const safe = escapeHtml(value);
+  if (!term) return safe;
+  const safeTerm = escapeHtml(term);
+  const idx = safe.toLowerCase().indexOf(safeTerm.toLowerCase());
+  if (idx === -1) return safe;
+  return safe.slice(0, idx) + "<mark>" + safe.slice(idx, idx + safeTerm.length) + "</mark>" + safe.slice(idx + safeTerm.length);
+}
 
 function renderEmergencyHelplines(filterCategory, searchTerm) {
   const list = document.getElementById("emergencyHelplinesList");
@@ -2119,11 +2168,14 @@ function renderEmergencyHelplines(filterCategory, searchTerm) {
           (e) => `<li class="hub-helpline-card">
             <span class="hub-helpline-icon" aria-hidden="true">${HELPLINE_ICONS[e.category] || "☎️"}</span>
             <div class="hub-helpline-info">
-              <strong>${escapeHtml(e.name)}</strong>
+              <strong>${highlightMatch(e.name, searchTerm)}</strong>
               <span class="hub-helpline-number">${escapeHtml(e.number)}</span>
-              <span class="muted hub-helpline-desc">${escapeHtml(e.description)}</span>
+              <span class="muted hub-helpline-desc">${highlightMatch(e.description, searchTerm)}</span>
             </div>
-            <a href="tel:${escapeHtml(e.number)}" class="btn safe-btn hub-helpline-call">📞 Call</a>
+            <div class="hub-helpline-actions">
+              <a href="tel:${escapeHtml(e.number)}" class="btn safe-btn hub-helpline-call">📞 Call</a>
+              <button type="button" class="btn secondary hub-helpline-copy" data-number="${escapeHtml(e.number)}" aria-label="Copy ${escapeHtml(e.name)} number">📋 Copy</button>
+            </div>
           </li>`
         )
         .join("")
@@ -2131,6 +2183,19 @@ function renderEmergencyHelplines(filterCategory, searchTerm) {
 }
 
 renderEmergencyHelplines();
+
+// Delegated "Copy Number" handler — one listener survives every re-render.
+document.getElementById("emergencyHelplinesList")?.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".hub-helpline-copy");
+  if (!btn) return;
+  const number = btn.dataset.number;
+  try {
+    await navigator.clipboard.writeText(number);
+    showNotification("📋 Copied", `${number} copied to clipboard.`, "info");
+  } catch (err) {
+    showNotification("Couldn't copy", `Number: ${number}`, "info");
+  }
+});
 
 const servicesList = document.getElementById("servicesList");
 const filterBtns = document.querySelectorAll(".filter-btn");
@@ -2216,7 +2281,7 @@ async function loadServices(serviceType, searchTerm) {
         <div class="service-card-header">
           <span class="service-card-icon">${icon}</span>
           <div>
-            <strong>${escapeHtml(s.name)}</strong>
+            <strong>${highlightMatch(s.name, searchTerm)}</strong>
             <div class="muted" style="font-size:11px; text-transform:capitalize;">${escapeHtml(s.type)}</div>
           </div>
           ${s.distance_km != null ? `<span class="service-card-distance">${s.distance_km} km</span>` : ""}
@@ -2263,7 +2328,7 @@ function filterHubContacts(searchTerm) {
           (c) => `<li class="hub-contact-card">
             <span class="hub-contact-avatar" aria-hidden="true">❤️</span>
             <div class="hub-contact-info">
-              <strong>${escapeHtml(c.name)}</strong>
+              <strong>${highlightMatch(c.name, searchTerm)}</strong>
               <span class="muted" style="font-size:11px;">${escapeHtml(c.relation || "contact")}</span>
             </div>
             <div class="hub-contact-actions">

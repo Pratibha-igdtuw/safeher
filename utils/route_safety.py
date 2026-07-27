@@ -33,6 +33,16 @@ except ImportError:  # pragma: no cover - requests should always be present per 
 OSRM_BASE_URL = "https://router.project-osrm.org"
 OSRM_TIMEOUT_SECONDS = 5
 
+NOMINATIM_BASE_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_TIMEOUT_SECONDS = 5
+# Nominatim's usage policy (https://operations.osmfoundation.org/policies/nominatim/)
+# requires a valid, identifying User-Agent for every request — anonymous/browser
+# UAs are liable to be rate-limited or blocked outright. Proxying the request
+# through the backend (instead of calling Nominatim directly from the browser)
+# lets us set this properly, keeps the CSP connect-src allow-list limited to
+# 'self', and matches the same server-side pattern already used for OSRM/Overpass.
+NOMINATIM_USER_AGENT = "SafeHer-App/1.0 (https://github.com/safeher; safety-map geocoding)"
+
 # Simulated incident density per area name (demo data only, text-only mode)
 SIMULATED_INCIDENT_DATA = {
     "default": 3,
@@ -157,18 +167,38 @@ def derive_open_status(service_type, opening_hours_tag=None):
     return {"status": "hours_vary", "label": "Hours vary — call to confirm"}
 
 
-def fetch_nearby_amenities_osm(lat, lng, amenity_types, radius_m=1500):
-    """Real nearby police/hospital/pharmacy data from OpenStreetMap via the
-    free Overpass API — no API key required. `amenity_types` is a list of
-    OSM `amenity=` tag values (e.g. ["police", "hospital", "pharmacy"]).
-    Returns [] on any failure so the caller can fall back to MOCK_SERVICES."""
-    if requests is None or not amenity_types:
+def fetch_nearby_amenities_osm(lat, lng, categories, radius_m=1500):
+    """Real nearby-service data from OpenStreetMap via the free Overpass
+    API — no API key required.
+
+    `categories` accepts either:
+      - a list of raw OSM `amenity=` tag values (original call style, e.g.
+        ["police", "hospital", "pharmacy"]), or
+      - a dict of {category_name: [(tag_key, tag_value), ...]} for
+        categories that aren't a plain `amenity=` tag (metro stations use
+        `railway`/`station`, public toilets/shelters/taxi stands vary too).
+
+    Every result is tagged with `type` = our own category name (not the
+    raw OSM tag), so callers never have to know which underlying OSM key
+    matched. Returns [] on any failure so the caller can fall back to
+    MOCK_SERVICES."""
+    if requests is None or not categories:
         return []
+
+    tag_filters = categories if isinstance(categories, dict) else {c: [("amenity", c)] for c in categories}
+
     try:
-        amenity_filter = "".join(
-            f'node["amenity"="{a}"](around:{radius_m},{lat},{lng});' for a in amenity_types
-        )
-        query = f"[out:json][timeout:{OSRM_TIMEOUT_SECONDS}];({amenity_filter});out center 30;"
+        filter_parts = []
+        # Recovers which of our friendlier category names a raw (key, value)
+        # OSM tag pair belongs to, since a tag like railway=station doesn't
+        # carry "metro" anywhere in it on its own.
+        category_for_tag = {}
+        for category, tag_pairs in tag_filters.items():
+            for key, value in tag_pairs:
+                filter_parts.append(f'node["{key}"="{value}"](around:{radius_m},{lat},{lng});')
+                category_for_tag[(key, value)] = category
+
+        query = f"[out:json][timeout:{OSRM_TIMEOUT_SECONDS}];({''.join(filter_parts)});out center 30;"
         resp = requests.post(
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
@@ -183,16 +213,75 @@ def fetch_nearby_amenities_osm(lat, lng, amenity_types, radius_m=1500):
             name = tags.get("name")
             if not name:
                 continue  # skip unnamed nodes — not useful in a directory list
-            amenity_type = tags.get("amenity")
+
+            matched_category = next(
+                (category for (key, value), category in category_for_tag.items() if tags.get(key) == value),
+                None,
+            )
+            if matched_category is None:
+                continue
+
             results.append({
                 "name": name,
-                "type": amenity_type,
+                "type": matched_category,
                 "lat": el.get("lat"),
                 "lng": el.get("lon"),
                 "phone": tags.get("phone") or tags.get("contact:phone") or "N/A",
                 "source": "osm",
-                "open_status": derive_open_status(amenity_type, tags.get("opening_hours")),
+                "open_status": derive_open_status(matched_category, tags.get("opening_hours")),
             })
         return results
+    except Exception:
+        return []
+
+
+def geocode_search(query, viewbox=None, limit=6):
+    """Forward-geocode a free-text query via Nominatim, server-side.
+
+    `viewbox` (optional) is a (min_lng, max_lat, max_lng, min_lat) tuple used
+    to bias/soft-prefer results toward the map's current view, same as the
+    frontend previously passed directly to Nominatim.
+
+    Returns a list of dicts shaped exactly like Nominatim's own response
+    (display_name/lat/lon, ...) so the existing frontend rendering code in
+    safety-map.js doesn't need to change — only the URL it fetches from does.
+    Returns [] on any failure (network, timeout, rate-limited, malformed
+    response) so the caller can show a friendly "no results" / "try again"
+    state instead of crashing, same degrade-gracefully pattern as the OSRM
+    and Overpass helpers above.
+    """
+    if requests is None or not query or not query.strip():
+        return []
+
+    query = query.strip()
+    if len(query) > 200:  # generous cap - nobody is typing a 200+ char address
+        query = query[:200]
+
+    params = {
+        "format": "jsonv2",
+        "addressdetails": 0,
+        "limit": max(1, min(int(limit or 6), 10)),
+        "q": query,
+    }
+    if viewbox:
+        params["viewbox"] = ",".join(str(v) for v in viewbox)
+        params["bounded"] = 0
+
+    try:
+        resp = requests.get(
+            NOMINATIM_BASE_URL,
+            params=params,
+            headers={
+                "User-Agent": NOMINATIM_USER_AGENT,
+                "Accept": "application/json",
+                "Referer": "https://safeher.app/safety-map",
+            },
+            timeout=NOMINATIM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return data
     except Exception:
         return []

@@ -33,6 +33,8 @@ import json
 import hashlib
 import secrets
 import logging
+import requests
+import threading
 from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
@@ -61,6 +63,7 @@ from utils.route_safety import (
     score_to_rating,
     fetch_nearby_amenities_osm,
     derive_open_status,
+    geocode_search,
 )
 from utils.distress_detector import check_distress
 from utils.safety_services import get_nearby_services, MOCK_SERVICES
@@ -90,6 +93,7 @@ from validators import (
     ResetPasswordSchema,
     RecoveryCodeVerifySchema,
     RecoveryCodesRegenerateSchema,
+    MapReportSchema,
 )
 
 from config import get_config
@@ -161,7 +165,8 @@ try:
         content_security_policy={
             "default-src": "'self'",
             "script-src": "'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com",
-            "style-src": "'self' 'unsafe-inline' https://unpkg.com",
+            "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
+            "font-src": "'self' https://fonts.gstatic.com",
             "img-src": "'self' data: https://*.tile.openstreetmap.org",
             "connect-src": "'self' ws: wss:",
         },
@@ -176,7 +181,8 @@ except ImportError:  # pragma: no cover - only hit if flask-talisman isn't insta
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org; "
             "script-src 'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com; "
-            "style-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' ws: wss:",
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "
+            "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:",
         )
         return resp
 
@@ -612,6 +618,46 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at
             ON admin_audit_log(created_at DESC);
+        -- Safety Map: quick category reports from long-pressing the map
+        -- (poor lighting, harassment, etc). user_id is kept for abuse
+        -- moderation only — it is never returned by the GET endpoint, so
+        -- reports are genuinely anonymous to other users viewing the map.
+        CREATE TABLE IF NOT EXISTS map_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            category TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        -- ---------------------------------------------------------------
+        -- Indices for the per-user lookups every dashboard widget makes
+        -- on every page load (Safety Score, Guardian Circle, Recent
+        -- Alerts, Journey, Guardian Status). SQLite's query planner falls
+        -- back to a full table scan on any of these without an index —
+        -- invisible at hackathon-demo data volumes, but the first thing
+        -- to fix before this app sees real production traffic.
+        -- ---------------------------------------------------------------
+        CREATE INDEX IF NOT EXISTS idx_contacts_user_id ON contacts(user_id);
+        CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_journeys_user_status ON journeys(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_guardian_shares_user_active ON guardian_shares(user_id, active);
+        CREATE INDEX IF NOT EXISTS idx_guardian_shares_active_updated ON guardian_shares(active, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_live_tracking_user_status ON live_tracking(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_location_history_user_ts ON location_history(user_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_risk_alerts_user_id ON risk_alerts(user_id);
+        CREATE INDEX IF NOT EXISTS idx_voice_analyses_user_id ON voice_analyses(user_id);
+        CREATE INDEX IF NOT EXISTS idx_assistant_messages_user_id ON assistant_messages(user_id);
+        CREATE INDEX IF NOT EXISTS idx_linked_contacts_user_id ON linked_contacts(user_id);
+        CREATE INDEX IF NOT EXISTS idx_linked_contacts_contact_user_id ON linked_contacts(contact_user_id);
+        -- audits is filtered by a lat/lng bounding box on every Safety
+        -- Score / risk-prediction request; a plain index on latitude lets
+        -- SQLite narrow the scan to the box's latitude range before
+        -- filtering longitude, instead of scanning every row.
+        CREATE INDEX IF NOT EXISTS idx_audits_latitude ON audits(latitude);
         """
     )
     conn.commit()
@@ -1963,6 +2009,72 @@ def route_safety():
     })
 
 
+@app.route("/api/geocode", methods=["GET"])
+@login_required
+@limiter.limit("30 per minute", key_func=_user_rate_limit_key)
+def geocode():
+    """Server-side proxy for the Safety Map search bar's location
+    autocomplete (Nominatim/OpenStreetMap geocoding).
+
+    Why this exists instead of the frontend calling Nominatim directly:
+      - Our Content-Security-Policy `connect-src` intentionally only allows
+        'self' + websockets, so third-party fetches from the browser are
+        blocked by design (defense-in-depth against exfiltration/XSS
+        pivoting) — proxying keeps that policy tight instead of punching a
+        hole in it for every geocoding provider we might use.
+      - Nominatim's usage policy requires a real, identifying User-Agent;
+        a proxy lets us set one correctly instead of relying on whatever a
+        given browser happens to send.
+      - Matches the existing pattern already used for OSRM (/api/route-safety)
+        and Overpass (used by /api/safety-services) — this app never calls
+        third-party geo APIs straight from client-side JS.
+    """
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify([])
+    if len(query) < 3:
+        # Same minimum the frontend already enforces before calling this at
+        # all; enforced again here so the endpoint is safe even if called
+        # directly.
+        return jsonify([])
+
+    viewbox = None
+    min_lng = request.args.get("min_lng", type=float)
+    max_lat = request.args.get("max_lat", type=float)
+    max_lng = request.args.get("max_lng", type=float)
+    min_lat = request.args.get("min_lat", type=float)
+    if None not in (min_lng, max_lat, max_lng, min_lat):
+        viewbox = (min_lng, max_lat, max_lng, min_lat)
+
+    results = geocode_search(query, viewbox=viewbox, limit=6)
+    return jsonify(results)
+
+
+@app.route("/api/weather", methods=["GET"])
+@login_required
+@limiter.limit("30 per minute", key_func=_user_rate_limit_key)
+def weather():
+    """Server-side proxy for the Safety Map's current-conditions widget
+    (Open-Meteo). Same reasoning as /api/geocode above: our CSP's
+    connect-src is locked to 'self', so third-party calls have to be
+    proxied through the backend rather than made from the browser."""
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    if lat is None or lng is None:
+        return jsonify({"error": "lat and lng are required"}), 400
+
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": lat, "longitude": lng, "current_weather": "true"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception:
+        return jsonify({"current_weather": None}), 200
+
+
 @app.route("/api/risk-zones", methods=["GET"])
 @login_required
 def risk_zones():
@@ -2016,6 +2128,66 @@ def risk_zones():
     conn.close()
 
     return jsonify({"zones": zones, "crowd_density": crowd_count, "center": {"lat": lat, "lng": lng}, "radius_km": radius_km})
+
+
+# ---------------------------------------------------------------------------
+# Safety Map: long-press "report an unsafe location" markers.
+# Reports are anonymous to other users — the GET endpoint never returns
+# user_id, only category/location/time. user_id is stored purely so an
+# abuse-moderation pass could be added later without a schema change.
+# ---------------------------------------------------------------------------
+MAP_REPORT_LABELS = {
+    "poor_lighting": "Poor lighting",
+    "harassment": "Harassment",
+    "suspicious_activity": "Suspicious activity",
+    "road_blocked": "Road blocked",
+    "unsafe_street": "Unsafe street",
+    "broken_cctv": "Broken CCTV",
+    "isolated_area": "Isolated area",
+}
+
+
+@app.route("/api/map-reports", methods=["POST"])
+@login_required
+@validate_json(MapReportSchema)
+def add_map_report():
+    data = g.validated_data
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO map_reports (user_id, category, latitude, longitude, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (current_user.id, data["category"], data["latitude"], data["longitude"], data.get("note", ""), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "reported", "category": data["category"]})
+
+
+@app.route("/api/map-reports", methods=["GET"])
+@login_required
+def list_map_reports():
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    radius_km = min(max(request.args.get("radius_km", default=5.0, type=float), 0.5), 25)
+
+    conn = get_db()
+    if lat is not None and lng is not None:
+        box = radius_km / 111.0
+        rows = conn.execute(
+            "SELECT category, latitude, longitude, note, created_at FROM map_reports "
+            "WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY id DESC LIMIT 300",
+            (lat - box, lat + box, lng - box, lng + box),
+        ).fetchall()
+        reports = [dict(r) for r in rows if haversine_distance(lat, lng, r["latitude"], r["longitude"]) <= radius_km]
+    else:
+        rows = conn.execute(
+            "SELECT category, latitude, longitude, note, created_at FROM map_reports ORDER BY id DESC LIMIT 300"
+        ).fetchall()
+        reports = [dict(r) for r in rows]
+    conn.close()
+
+    for r in reports:
+        r["label"] = MAP_REPORT_LABELS.get(r["category"], r["category"])
+    return jsonify({"reports": reports})
 
 
 # ---------------------------------------------------------------------------
@@ -2681,7 +2853,20 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 # ---------------------------------------------------------------------------
 # Nearby safety services directory
 # ---------------------------------------------------------------------------
-OSM_AMENITY_MAP = {"police": "police", "hospital": "hospital", "pharmacy": "pharmacy"}
+OSM_CATEGORY_TAGS = {
+    "police": [("amenity", "police")],
+    "hospital": [("amenity", "hospital")],
+    "pharmacy": [("amenity", "pharmacy")],
+    # Extended categories for the Safety Map's nearby-services list (all
+    # real OSM tags via the same free Overpass lookup — no API key, no
+    # invented coordinates). Coverage for these varies more by city/area
+    # than police/hospital/pharmacy, so an empty result for one of these is
+    # expected in some locations rather than a bug.
+    "metro": [("station", "subway"), ("railway", "station")],
+    "toilet": [("amenity", "toilets")],
+    "shelter": [("social_facility", "shelter"), ("amenity", "social_facility")],
+    "cab_stand": [("amenity", "taxi")],
+}
 
 
 def _lookup_nearby_services(lat, lng, service_type=None):
@@ -2690,9 +2875,9 @@ def _lookup_nearby_services(lat, lng, service_type=None):
     assistant having its own separate (and potentially inconsistent)
     lookup path."""
     osm_results = []
-    if lat is not None and lng is not None and (service_type is None or service_type in OSM_AMENITY_MAP):
-        amenity_types = [OSM_AMENITY_MAP[service_type]] if service_type in OSM_AMENITY_MAP else list(OSM_AMENITY_MAP.values())
-        osm_results = fetch_nearby_amenities_osm(lat, lng, amenity_types)
+    if lat is not None and lng is not None and (service_type is None or service_type in OSM_CATEGORY_TAGS):
+        tag_filters = {service_type: OSM_CATEGORY_TAGS[service_type]} if service_type in OSM_CATEGORY_TAGS else OSM_CATEGORY_TAGS
+        osm_results = fetch_nearby_amenities_osm(lat, lng, tag_filters)
 
     if osm_results:
         source = "osm"
@@ -3423,6 +3608,29 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(app.config["DATABASE_PATH"]) or ".", exist_ok=True)
     init_db()
     seed_default_admin()
+
+    def _warm_up_risk_model():
+        """Runs in a background thread so it never delays the server
+        from accepting connections. Without this, the ~1-2s cost of
+        unpickling the RandomForest risk model (models/risk_predictor.pkl)
+        is paid inline by whichever request calls /api/safety-score or
+        /api/check-location-risk first — in practice, the Safety Score
+        widget that fires automatically on every dashboard page load,
+        so the very first person to open the dashboard after each
+        restart would see that widget hang while the model loads."""
+        try:
+            t0 = datetime.utcnow()
+            get_predictor().warm_up()
+            elapsed_ms = (datetime.utcnow() - t0).total_seconds() * 1000
+            logger.info("Risk predictor model warm-up complete in %.0fms", elapsed_ms)
+        except Exception:
+            # Never let a warm-up failure take down the server — predict()
+            # still degrades gracefully to the geofence heuristic if the
+            # model never loads (see utils/risk_predictor.py).
+            logger.exception("Risk predictor warm-up failed; will retry lazily on first request")
+
+    threading.Thread(target=_warm_up_risk_model, daemon=True, name="risk-model-warmup").start()
+
     logger.info(
         "Starting SafeHer (env=%s, debug=%s, host=%s, port=%s)",
         app.config.get("ENV_NAME", "unknown"), app.config["DEBUG"], app.config["HOST"], app.config["PORT"],
