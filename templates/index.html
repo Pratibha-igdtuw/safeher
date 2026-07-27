@@ -13,14 +13,17 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-<!-- FEATURE 4: WebSocket for real-time notifications -->
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<!-- TIER 1 FEATURE 1: TensorFlow.js — used client-side only to capture mic
-     audio and compute a log-mel spectrogram; the actual YAMNet inference
-     runs server-side in /api/audio-classify (see static/js/main.js and
-     utils/audio_classifier.py). Loaded lazily; main.js works fine (via the
-     transcript-keyword path) even if this CDN is unreachable. -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<!-- Performance note: external <script> tags for socket.io/leaflet/lucide
+     live at the end of <body> (just before main.js, which needs them),
+     not here. A <script> in <head> without defer/async blocks HTML
+     parsing until it loads — if a CDN is slow or unreachable that stalls
+     first paint for the browser's full connection-timeout duration. The
+     socket.io tag that used to be duplicated here has been removed (it's
+     loaded once, correctly, below); TensorFlow.js has been removed
+     entirely — it was never actually used anywhere in this codebase (the
+     audio-distress pipeline computes its spectrogram with a small
+     hand-rolled FFT in static/js/main.js, not tf.js), so it was pure
+     multi-hundred-KB dead weight on every single page load. -->
 </head>
 <body>
 

@@ -89,18 +89,23 @@
         return;
       }
       try {
-        // Nominatim (OpenStreetMap) — free, keyless geocoding. Biased
-        // toward the current map view so "Central Hospital" near Delhi
-        // doesn't return a same-named place in another country.
+        // Geocoding goes through our own /api/geocode, which proxies
+        // Nominatim (OpenStreetMap) server-side — the browser can't call
+        // nominatim.openstreetmap.org directly because our CSP's
+        // connect-src is locked to 'self' (see app.py). Biased toward the
+        // current map view so "Central Hospital" near Delhi doesn't return
+        // a same-named place in another country.
         const center = leafletMap ? leafletMap.getCenter() : { lat: 28.7041, lng: 77.1025 };
-        const viewbox = leafletMap
-          ? [center.lng - 0.6, center.lat + 0.6, center.lng + 0.6, center.lat - 0.6].join(",")
-          : "";
-        const url =
-          `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=0&limit=6` +
-          `&q=${encodeURIComponent(query)}` +
-          (viewbox ? `&viewbox=${viewbox}&bounded=0` : "");
-        const resp = await fetch(url, { headers: { Accept: "application/json" } });
+        const params = new URLSearchParams({ q: query });
+        if (leafletMap) {
+          params.set("min_lng", center.lng - 0.6);
+          params.set("max_lat", center.lat + 0.6);
+          params.set("max_lng", center.lng + 0.6);
+          params.set("min_lat", center.lat - 0.6);
+        }
+        const resp = await fetch(`/api/geocode?${params.toString()}`, {
+          headers: { Accept: "application/json" },
+        });
         if (!resp.ok) throw new Error("geocode failed");
         activeResults = await resp.json();
         renderSuggestions();
@@ -698,10 +703,13 @@
     }
 
     // Weather — Open-Meteo, free and keyless, real current conditions.
+    // Proxied through /api/weather (see app.py) since our CSP's connect-src
+    // is locked to 'self' and doesn't allow direct browser calls out to
+    // third-party APIs.
     const weatherEl = document.getElementById("statWeather");
     if (weatherEl) {
       try {
-        const resp = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}&current_weather=true`);
+        const resp = await fetch(`/api/weather?lat=${location.latitude}&lng=${location.longitude}`);
         const wd = await resp.json();
         if (wd.current_weather) {
           weatherEl.textContent = `${Math.round(wd.current_weather.temperature)}°C · ${describeWeatherCode(wd.current_weather.weathercode)}`;

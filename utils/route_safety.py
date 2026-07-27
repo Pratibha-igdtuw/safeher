@@ -33,6 +33,16 @@ except ImportError:  # pragma: no cover - requests should always be present per 
 OSRM_BASE_URL = "https://router.project-osrm.org"
 OSRM_TIMEOUT_SECONDS = 5
 
+NOMINATIM_BASE_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_TIMEOUT_SECONDS = 5
+# Nominatim's usage policy (https://operations.osmfoundation.org/policies/nominatim/)
+# requires a valid, identifying User-Agent for every request — anonymous/browser
+# UAs are liable to be rate-limited or blocked outright. Proxying the request
+# through the backend (instead of calling Nominatim directly from the browser)
+# lets us set this properly, keeps the CSP connect-src allow-list limited to
+# 'self', and matches the same server-side pattern already used for OSRM/Overpass.
+NOMINATIM_USER_AGENT = "SafeHer-App/1.0 (https://github.com/safeher; safety-map geocoding)"
+
 # Simulated incident density per area name (demo data only, text-only mode)
 SIMULATED_INCIDENT_DATA = {
     "default": 3,
@@ -221,5 +231,57 @@ def fetch_nearby_amenities_osm(lat, lng, categories, radius_m=1500):
                 "open_status": derive_open_status(matched_category, tags.get("opening_hours")),
             })
         return results
+    except Exception:
+        return []
+
+
+def geocode_search(query, viewbox=None, limit=6):
+    """Forward-geocode a free-text query via Nominatim, server-side.
+
+    `viewbox` (optional) is a (min_lng, max_lat, max_lng, min_lat) tuple used
+    to bias/soft-prefer results toward the map's current view, same as the
+    frontend previously passed directly to Nominatim.
+
+    Returns a list of dicts shaped exactly like Nominatim's own response
+    (display_name/lat/lon, ...) so the existing frontend rendering code in
+    safety-map.js doesn't need to change — only the URL it fetches from does.
+    Returns [] on any failure (network, timeout, rate-limited, malformed
+    response) so the caller can show a friendly "no results" / "try again"
+    state instead of crashing, same degrade-gracefully pattern as the OSRM
+    and Overpass helpers above.
+    """
+    if requests is None or not query or not query.strip():
+        return []
+
+    query = query.strip()
+    if len(query) > 200:  # generous cap - nobody is typing a 200+ char address
+        query = query[:200]
+
+    params = {
+        "format": "jsonv2",
+        "addressdetails": 0,
+        "limit": max(1, min(int(limit or 6), 10)),
+        "q": query,
+    }
+    if viewbox:
+        params["viewbox"] = ",".join(str(v) for v in viewbox)
+        params["bounded"] = 0
+
+    try:
+        resp = requests.get(
+            NOMINATIM_BASE_URL,
+            params=params,
+            headers={
+                "User-Agent": NOMINATIM_USER_AGENT,
+                "Accept": "application/json",
+                "Referer": "https://safeher.app/safety-map",
+            },
+            timeout=NOMINATIM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return data
     except Exception:
         return []
