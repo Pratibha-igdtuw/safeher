@@ -478,6 +478,7 @@
         <button class="btn map-nearby-filter-btn" data-type="shelter">Safe Shelter</button>
         <button class="btn map-nearby-filter-btn" data-type="toilet">Public Toilet</button>
         <button class="btn map-nearby-filter-btn" data-type="cab_stand">Safe Cab Stand</button>
+        <button class="btn map-nearby-filter-btn" data-type="atm">ATM</button>
       </div>
       <div id="mapNearbyEmptyState" class="hub-empty-state hidden">
         <span class="hub-empty-state-icon" aria-hidden="true">📍</span>
@@ -496,6 +497,7 @@
         <input id="mapSearchInput" type="text" placeholder="Search address, landmark, college, metro, hospital…" autocomplete="off" aria-label="Search a location on the map" />
         <button id="mapSearchClearBtn" class="map-search-clear hidden" type="button" aria-label="Clear search">✕</button>
         <ul id="mapSearchSuggestions" class="map-search-suggestions hidden" role="listbox"></ul>
+        <div id="mapSearchHistory" class="map-search-history hidden"></div>
       </div>
 
       <button id="mapMyLocationBtn" class="map-my-location-btn" type="button" aria-label="Center map on my current location" title="My Location">📍</button>
@@ -850,6 +852,7 @@
 <script src="{{ url_for('static', filename='js/tilt.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/scroll-reveal.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/premium-enhancements.js') }}" defer></script>
+
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {

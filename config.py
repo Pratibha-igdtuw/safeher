@@ -110,6 +110,28 @@ class Config:
     # How many single-use recovery codes are (re)generated at a time.
     RECOVERY_CODES_COUNT = int(os.environ.get("RECOVERY_CODES_COUNT", 10))
 
+    # --- Safety Map v2: Geoapify (search/autocomplete/reverse-geocode/places)
+    # and GraphHopper (routing) -------------------------------------------
+    # Both are optional. Leaving these unset does NOT break the map: every
+    # call site falls back to the existing free/keyless path (Nominatim for
+    # search, Overpass for nearby places, OSRM for routing) — same
+    # degrade-gracefully pattern as the TensorFlow/pywebpush entries in
+    # requirements.txt. Set these to unlock Geoapify's richer autocomplete/
+    # places coverage and GraphHopper's routing.
+    #
+    # GEOAPIFY_API_KEY is used two ways:
+    #   1. Server-side, for the /api/places/* proxy routes (never sent to
+    #      the browser directly — same CSP-friendly proxy pattern already
+    #      used for Nominatim/OSRM/Overpass in utils/route_safety.py).
+    #   2. Optionally client-side, ONLY if MAP_STYLE_PROVIDER=geoapify, to
+    #      load a real MapLibre vector style directly from Geoapify's CDN
+    #      (their map/style keys are designed to be embedded client-side,
+    #      like Mapbox/Google Maps JS keys — restrict it by HTTP referrer
+    #      in the Geoapify dashboard if you enable this).
+    GEOAPIFY_API_KEY = os.environ.get("GEOAPIFY_API_KEY", "")
+    MAP_STYLE_PROVIDER = os.environ.get("MAP_STYLE_PROVIDER", "osm")  # "osm" (free raster, default) | "geoapify" (vector, needs GEOAPIFY_API_KEY)
+    GRAPHHOPPER_API_KEY = os.environ.get("GRAPHHOPPER_API_KEY", "")
+
 
 class DevConfig(Config):
     ENV_NAME = "development"

@@ -1201,6 +1201,13 @@ textarea {
 .map-favorite-chip:hover { transform: translateY(-1px); box-shadow: var(--depth-1); }
 .map-favorite-chip em { font-style: normal; color: var(--muted); font-size: 10px; }
 .map-favorite-chip.is-saved { border-color: var(--violet); color: var(--violet-2); font-weight: 700; }
+.map-favorite-chip-removable { display: inline-flex; align-items: center; gap: 6px; }
+.map-favorite-remove {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; background: var(--surface-3, rgba(0,0,0,0.06));
+  font-size: 11px; line-height: 1; color: var(--muted);
+}
+.map-favorite-remove:hover { background: var(--danger, #e0435c); color: #fff; }
 
 .map-layers-grid {
   display: flex;
@@ -1239,7 +1246,9 @@ textarea {
 .map-nearby-icon { font-size: 20px; flex: none; }
 .map-nearby-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .map-nearby-meta { font-size: 11px; color: var(--muted); }
-.map-nearby-nav { flex: none; padding: 6px 12px; font-size: 11px; margin-top: 0; text-decoration: none; }
+.map-nearby-address { display: block; }
+.map-nearby-actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.map-nearby-nav, .map-nearby-call { flex: none; padding: 6px 12px; font-size: 11px; margin-top: 0; text-decoration: none; text-align: center; }
 
 /* ---------------- Safety Map: search bar + my-location button ---------------- */
 .map-search-bar {
@@ -1287,6 +1296,7 @@ textarea {
   top: calc(100% + 8px);
   left: 0;
   right: 0;
+  z-index: 500;
   max-height: 320px;
   overflow-y: auto;
   list-style: none;
@@ -1311,6 +1321,55 @@ textarea {
 .map-search-suggestion:hover { background: var(--surface-2); }
 .map-search-suggestion-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-search-empty { padding: 10px; font-size: 12px; color: var(--muted); }
+
+.map-search-history {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 495;
+  background: rgba(255,255,255,0.98);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--depth-1);
+  padding: 10px 32px 10px 10px; /* extra right padding so chips never sit under the close button */
+  animation: card-slide-in 0.18s ease;
+}
+.map-search-history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-right: 4px; }
+.map-search-history-clear { background: none; border: none; color: var(--violet-2); font-size: 11px; cursor: pointer; padding: 0; }
+.map-search-history-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-search-history-close:hover { background: var(--danger, #e0435c); color: #fff; }
+.map-search-history-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px; margin: 0 6px 6px 0; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  font-size: 12px; cursor: pointer;
+}
+.map-search-history-chip:hover { border-color: var(--violet); }
+
+/* Reverse-geocode-on-tap popup (MapLibre popup content — see map/places-ui.js) */
+.rg-popup-body { min-width: 200px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.rg-popup-title { font-size: 14px; }
+.rg-popup-address, .rg-popup-coords { font-size: 11px; }
+.rg-popup-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.rg-popup-actions .btn { font-size: 11px; padding: 6px 10px; margin-top: 0; }
 
 .map-my-location-btn {
   position: absolute;

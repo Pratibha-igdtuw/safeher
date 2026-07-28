@@ -89,33 +89,40 @@
         return;
       }
       try {
-        // Geocoding goes through our own /api/geocode, which proxies
-        // Nominatim (OpenStreetMap) server-side — the browser can't call
-        // nominatim.openstreetmap.org directly because our CSP's
-        // connect-src is locked to 'self' (see app.py). Biased toward the
-        // current map view so "Central Hospital" near Delhi doesn't return
-        // a same-named place in another country.
+        // Geocoding goes through our own /api/places/autocomplete, which
+        // proxies Geoapify server-side when GEOAPIFY_API_KEY is configured
+        // (falling back automatically to the original Nominatim-backed
+        // /api/geocode path otherwise) — the browser can't call Geoapify
+        // or Nominatim directly because our CSP's connect-src is locked to
+        // 'self' (see app.py). Biased toward the current map view so
+        // "Central Hospital" near Delhi doesn't return a same-named place
+        // in another country.
         const center = leafletMap ? leafletMap.getCenter() : { lat: 28.7041, lng: 77.1025 };
         const params = new URLSearchParams({ q: query });
         if (leafletMap) {
+          params.set("lat", center.lat);
+          params.set("lng", center.lng);
           params.set("min_lng", center.lng - 0.6);
           params.set("max_lat", center.lat + 0.6);
           params.set("max_lng", center.lng + 0.6);
           params.set("min_lat", center.lat - 0.6);
         }
-        const resp = await fetch(`/api/geocode?${params.toString()}`, {
+        const resp = await fetch(`/api/places/autocomplete?${params.toString()}`, {
           headers: { Accept: "application/json" },
         });
         if (!resp.ok) throw new Error("geocode failed");
         activeResults = await resp.json();
         renderSuggestions();
+        if (typeof recordSearchHistory === "function" && activeResults.length) recordSearchHistory(query);
       } catch (err) {
         suggestionsEl.innerHTML = `<li class="map-search-empty">Couldn't reach the search service right now.</li>`;
         suggestionsEl.classList.remove("hidden");
+        window.safeherHideSearchHistory?.();
       }
     }
 
     function renderSuggestions() {
+      window.safeherHideSearchHistory?.();
       if (!activeResults.length) {
         suggestionsEl.innerHTML = `<li class="map-search-empty">No matches. Try a fuller address or a nearby landmark.</li>`;
         suggestionsEl.classList.remove("hidden");
@@ -140,6 +147,7 @@
 
       input.value = result.display_name;
       closeSuggestions();
+      window.safeherHideSearchHistory?.();
       clearBtn?.classList.remove("hidden");
 
       if (!leafletMap) return;
@@ -163,8 +171,18 @@
 
     input.addEventListener("input", () => {
       clearBtn?.classList.toggle("hidden", !input.value);
-      clearTimeout(debounceTimer);
       const query = input.value.trim();
+      if (!query) {
+        // Cleared back to empty (backspace/select-all-delete, not just the
+        // × button) — close suggestions and hand the dropdown slot back to
+        // Recent Searches, exactly like the × button does.
+        closeSuggestions();
+        window.safeherShowSearchHistory?.();
+        clearTimeout(debounceTimer);
+        return;
+      }
+      window.safeherHideSearchHistory?.(); // typing always cedes the single dropdown slot to suggestions
+      clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => runSearch(query), 350);
     });
 
@@ -180,6 +198,7 @@
       clearBtn.classList.add("hidden");
       closeSuggestions();
       input.focus();
+      window.safeherShowSearchHistory?.();
     });
 
     document.addEventListener("click", (e) => {
@@ -221,10 +240,11 @@
   // 4. Favourite places
   // ---------------------------------------------------------------------
   const FAVORITES_KEY = "safeher_favorite_places"; // TODO: sync to backend (new /api/favorites) once available — localStorage only for now
+  const FAVORITES_LIST_KEY = "safeher_favorites_list"; // arbitrary, growable ⭐ Favorites (as opposed to the 4 fixed slots below)
   const FAVORITE_SLOTS = [
     { id: "home", icon: "🏠", label: "Home" },
     { id: "office", icon: "🏢", label: "Office" },
-    { id: "college", icon: "🎓", label: "College" },
+    { id: "college", icon: "🏫", label: "College" },
     { id: "hostel", icon: "🏨", label: "Hostel" },
   ];
 
@@ -244,22 +264,87 @@
     }
   }
 
+  function loadFavoritesList() {
+    try {
+      return JSON.parse(localStorage.getItem(FAVORITES_LIST_KEY) || "[]");
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveFavoritesList(list) {
+    try {
+      localStorage.setItem(FAVORITES_LIST_KEY, JSON.stringify(list));
+    } catch (e) {
+      /* private-mode/quota */
+    }
+  }
+
+  // Called by places-ui.js's "⭐ Save" action on the reverse-geocode popup.
+  // Kept here (rather than duplicated in places-ui.js) so there's a single
+  // source of truth for favorites storage/rendering.
+  window.safeherSaveToFavorites = function (name, lat, lng) {
+    const list = loadFavoritesList();
+    if (list.some((f) => Math.abs(f.lat - lat) < 0.0001 && Math.abs(f.lng - lng) < 0.0001)) {
+      toast("Already saved", "This spot is already in your Favorites.", "info");
+      return;
+    }
+    list.unshift({ id: `fav-${Date.now()}`, name: name || "Saved place", lat, lng });
+    saveFavoritesList(list.slice(0, 20)); // cap so the chip row doesn't grow unbounded
+    toast("⭐ Saved to Favorites", name || "Location saved.", "info");
+    if (typeof renderFavoritesRow === "function") renderFavoritesRow();
+  };
+
+  let renderFavoritesRow = null;
+
   function initFavorites() {
     const row = document.getElementById("mapFavoritesRow");
     if (!row) return;
 
     function render() {
       const favs = loadFavorites();
-      row.innerHTML = FAVORITE_SLOTS.map((slot) => {
+      const slotChips = FAVORITE_SLOTS.map((slot) => {
         const saved = favs[slot.id];
         return `<button type="button" class="map-favorite-chip ${saved ? "is-saved" : ""}" data-slot="${slot.id}" title="${saved ? "Go to " + slot.label : "Save current map center as " + slot.label}">
           <span aria-hidden="true">${slot.icon}</span> ${slot.label}${saved ? "" : " <em>(tap to save)</em>"}
         </button>`;
       }).join("");
+
+      const favList = loadFavoritesList();
+      const favChips = favList
+        .map(
+          (f) =>
+            `<button type="button" class="map-favorite-chip is-saved map-favorite-chip-removable" data-fav-id="${f.id}" title="${escapeHtml(f.name)} — tap to go, long-press × to remove">
+              <span aria-hidden="true">⭐</span> ${escapeHtml(f.name.length > 18 ? f.name.slice(0, 18) + "…" : f.name)}
+              <span class="map-favorite-remove" data-remove-fav="${f.id}" aria-label="Remove ${escapeHtml(f.name)} from Favorites">×</span>
+            </button>`
+        )
+        .join("");
+
+      row.innerHTML = slotChips + favChips;
     }
+    renderFavoritesRow = render;
 
     row.addEventListener("click", (e) => {
-      const chip = e.target.closest(".map-favorite-chip");
+      const removeBtn = e.target.closest("[data-remove-fav]");
+      if (removeBtn) {
+        const list = loadFavoritesList().filter((f) => f.id !== removeBtn.dataset.removeFav);
+        saveFavoritesList(list);
+        render();
+        return;
+      }
+
+      const favChip = e.target.closest("[data-fav-id]");
+      if (favChip && leafletMap) {
+        const fav = loadFavoritesList().find((f) => f.id === favChip.dataset.favId);
+        if (fav) {
+          leafletMap.flyTo([fav.lat, fav.lng], 16, { duration: 1 });
+          toast(`⭐ ${fav.name}`, "Jumped to your saved favorite.", "info");
+        }
+        return;
+      }
+
+      const chip = e.target.closest(".map-favorite-chip[data-slot]");
       if (!chip || !leafletMap) return;
       const slotId = chip.dataset.slot;
       const favs = loadFavorites();
@@ -473,14 +558,19 @@
       .map((s, i) => {
         const { walkMin, driveMin } = estimateEtaMinutes(s.distance_km ?? 0);
         const icon = SERVICE_ICONS[s.type] || "📍";
+        const hasPhone = s.phone && s.phone !== "N/A";
         return `<li class="map-nearby-item" data-index="${i}" tabindex="0" role="button">
           <span class="map-nearby-icon" aria-hidden="true">${icon}</span>
           <div class="map-nearby-info">
             <strong>${escapeHtml(s.name)}</strong>
             <span class="muted" style="font-size:11px; text-transform:capitalize;">${escapeHtml(s.type.replace("_", " "))}</span>
+            ${s.address ? `<span class="muted map-nearby-address" style="font-size:11px;">${escapeHtml(s.address)}</span>` : ""}
             <span class="map-nearby-meta">${fmtDistance(s.distance_km)} · 🚶 ~${walkMin} min · 🚗 ~${driveMin} min</span>
           </div>
-          <a href="https://www.openstreetmap.org/directions?to=${s.lat}%2C${s.lng}" target="_blank" rel="noopener" class="btn secondary map-nearby-nav" aria-label="Navigate to ${escapeHtml(s.name)}">Navigate</a>
+          <div class="map-nearby-actions">
+            ${hasPhone ? `<a href="tel:${escapeHtml(s.phone)}" class="btn secondary map-nearby-call" aria-label="Call ${escapeHtml(s.name)}">📞 Call</a>` : ""}
+            <a href="https://www.openstreetmap.org/directions?to=${s.lat}%2C${s.lng}" target="_blank" rel="noopener" class="btn secondary map-nearby-nav" aria-label="Navigate to ${escapeHtml(s.name)}">Navigate</a>
+          </div>
         </li>`;
       })
       .join("");
@@ -492,7 +582,7 @@
         leafletMap.flyTo([s.lat, s.lng], 17, { duration: 1 });
         L.popup().setLatLng([s.lat, s.lng]).setContent(`<strong>${escapeHtml(s.name)}</strong><br/>${fmtDistance(s.distance_km)} away`).openOn(leafletMap);
       };
-      li.addEventListener("click", (e) => { if (!e.target.closest(".map-nearby-nav")) openIt(); });
+      li.addEventListener("click", (e) => { if (!e.target.closest(".map-nearby-nav") && !e.target.closest(".map-nearby-call")) openIt(); });
       li.addEventListener("keydown", (e) => { if (e.key === "Enter") openIt(); });
     });
   }
