@@ -1862,7 +1862,7 @@ async function refreshMapLayers() {
   crowdDensityBadge.classList.remove("hidden");
 }
 
-const SERVICE_ICONS = { police: "🚓", hospital: "🏥", pharmacy: "💊", helpline: "📞", metro: "🚇", toilet: "🚻", shelter: "🏠", cab_stand: "🚕" };
+const SERVICE_ICONS = { police: "🚓", hospital: "🏥", pharmacy: "💊", helpline: "📞", metro: "🚇", toilet: "🚻", shelter: "🏠", cab_stand: "🚕", atm: "🏧" };
 
 async function refreshServiceLayer() {
   if (!leafletMap || !showServices) return;

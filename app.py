@@ -59,6 +59,7 @@ from utils.alerts import send_sos_alert, send_email
 from utils.route_safety import (
     get_route_safety_score,
     fetch_osrm_routes,
+    fetch_best_available_routes,
     sample_route_points,
     score_to_rating,
     fetch_nearby_amenities_osm,
@@ -70,6 +71,7 @@ from utils.safety_services import get_nearby_services, MOCK_SERVICES
 from utils.assistant import generate_reply as generate_assistant_reply
 from utils.audio_classifier import classify_audio_payload
 from utils.risk_predictor import get_predictor
+from utils import geoapify_client
 from validators import (
     validate_json,
     LoginSchema,
@@ -167,8 +169,16 @@ try:
             "script-src": "'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com",
             "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
             "font-src": "'self' https://fonts.gstatic.com",
-            "img-src": "'self' data: https://*.tile.openstreetmap.org",
-            "connect-src": "'self' ws: wss:",
+            "img-src": "'self' data: blob: https://*.tile.openstreetmap.org https://maps.geoapify.com",
+            # MapLibre GL JS fetches tiles/styles/sprites via fetch()/XHR
+            # (not <img> tags like Leaflet did), so those domains need to be
+            # in connect-src, not just img-src. https://maps.geoapify.com is
+            # only ever actually reached if MAP_STYLE_PROVIDER=geoapify;
+            # harmless to allow-list unconditionally otherwise.
+            "connect-src": "'self' ws: wss: https://*.tile.openstreetmap.org https://maps.geoapify.com",
+            # MapLibre GL JS runs its vector-tile parsing in a Web Worker,
+            # which browsers load as a blob: URL.
+            "worker-src": "'self' blob:",
         },
         content_security_policy_nonce_in=[],
     )
@@ -179,10 +189,11 @@ except ImportError:  # pragma: no cover - only hit if flask-talisman isn't insta
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org; "
+            "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://maps.geoapify.com; "
             "script-src 'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "
-            "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:",
+            "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss: https://*.tile.openstreetmap.org https://maps.geoapify.com; "
+            "worker-src 'self' blob:",
         )
         return resp
 
@@ -1306,7 +1317,12 @@ def recover_2fa_login():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    return render_template("index.html", is_admin=current_user.is_admin)
+    return render_template(
+        "index.html",
+        is_admin=current_user.is_admin,
+        map_style_provider=app.config.get("MAP_STYLE_PROVIDER", "osm"),
+        geoapify_api_key=app.config.get("GEOAPIFY_API_KEY", ""),
+    )
 
 
 @app.route("/offline")
@@ -1962,8 +1978,10 @@ def route_safety():
 
     conn = get_db()
 
-    osrm_routes = fetch_osrm_routes(
-        o_lat, o_lng, d_lat, d_lng, alternatives=data.get("compare_alternatives", False)
+    osrm_routes, routing_provider = fetch_best_available_routes(
+        o_lat, o_lng, d_lat, d_lng,
+        graphhopper_api_key=app.config.get("GRAPHHOPPER_API_KEY", ""),
+        alternatives=data.get("compare_alternatives", False),
     )
 
     if osrm_routes:
@@ -1974,7 +1992,7 @@ def route_safety():
             if scored:
                 scored.update({"distance_km": route["distance_km"], "duration_min": route["duration_min"]})
                 scored_routes.append(scored)
-        mode = "osrm"
+        mode = routing_provider
     else:
         # OSRM unreachable — fall back to a straight-line estimate so the
         # feature still works offline, clearly labeled as approximate.
@@ -2003,7 +2021,7 @@ def route_safety():
         "distance": best["distance_km"], "estimated_score": best["score"],
         "routes": scored_routes,
         "note": (
-            "Real road routing + risk-zone scoring." if mode == "osrm"
+            "Real road routing + risk-zone scoring." if mode in ("osrm", "graphhopper")
             else "Routing service unavailable — showing a straight-line estimate."
         ),
     })
@@ -2048,6 +2066,64 @@ def geocode():
 
     results = geocode_search(query, viewbox=viewbox, limit=6)
     return jsonify(results)
+
+
+@app.route("/api/places/autocomplete", methods=["GET"])
+@login_required
+@limiter.limit("30 per minute", key_func=_user_rate_limit_key)
+def places_autocomplete():
+    """Safety Map v2 search bar: Geoapify Autocomplete, proxied server-side
+    for the same reasons /api/geocode is (CSP connect-src stays locked to
+    'self', and we control the outbound User-Agent/key). Falls back to the
+    original Nominatim-backed geocode_search() if GEOAPIFY_API_KEY isn't
+    configured, or if Geoapify returns nothing — the app works identically
+    either way, just with better coverage when a key is set.
+
+    Returns the SAME shape /api/geocode always has (display_name/lat/lon),
+    plus a few additive fields — the frontend's existing suggestion-
+    rendering code (initMapSearch() in safety-map.js) needs no changes."""
+    query = (request.args.get("q") or "").strip()
+    if not query or len(query) < 3:
+        return jsonify([])
+
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    api_key = app.config.get("GEOAPIFY_API_KEY", "")
+
+    results = geoapify_client.autocomplete_search(query, api_key, lat=lat, lng=lng, limit=6)
+    if results:
+        return jsonify(results)
+
+    # No key, or Geoapify returned nothing — same viewbox-biasing fallback
+    # /api/geocode already uses.
+    viewbox = None
+    min_lng = request.args.get("min_lng", type=float)
+    max_lat = request.args.get("max_lat", type=float)
+    max_lng = request.args.get("max_lng", type=float)
+    min_lat = request.args.get("min_lat", type=float)
+    if None not in (min_lng, max_lat, max_lng, min_lat):
+        viewbox = (min_lng, max_lat, max_lng, min_lat)
+    return jsonify(geocode_search(query, viewbox=viewbox, limit=6))
+
+
+@app.route("/api/places/reverse", methods=["GET"])
+@login_required
+@limiter.limit("30 per minute", key_func=_user_rate_limit_key)
+def places_reverse():
+    """Reverse-geocode a tapped map point (Safety Map v2's tap-anywhere
+    address lookup). Geoapify-backed if GEOAPIFY_API_KEY is configured;
+    returns a clear 'unavailable' response otherwise rather than silently
+    guessing an address — the caller (places-ui.js) shows raw coordinates
+    in that case, which is still honest and useful."""
+    lat = request.args.get("lat", type=float)
+    lng = request.args.get("lng", type=float)
+    if lat is None or lng is None:
+        return jsonify({"error": "lat and lng are required"}), 400
+
+    result = geoapify_client.reverse_geocode(lat, lng, app.config.get("GEOAPIFY_API_KEY", ""))
+    if result is None:
+        return jsonify({"available": False, "lat": lat, "lng": lng})
+    return jsonify({"available": True, **result})
 
 
 @app.route("/api/weather", methods=["GET"])
@@ -2866,6 +2942,7 @@ OSM_CATEGORY_TAGS = {
     "toilet": [("amenity", "toilets")],
     "shelter": [("social_facility", "shelter"), ("amenity", "social_facility")],
     "cab_stand": [("amenity", "taxi")],
+    "atm": [("amenity", "atm")],
 }
 
 
@@ -2873,24 +2950,44 @@ def _lookup_nearby_services(lat, lng, service_type=None):
     """Shared by /api/nearby-services and the AI Assistant's nearby_help
     intent, so both give consistent, real answers instead of the
     assistant having its own separate (and potentially inconsistent)
-    lookup path."""
-    osm_results = []
-    if lat is not None and lng is not None and (service_type is None or service_type in OSM_CATEGORY_TAGS):
-        tag_filters = {service_type: OSM_CATEGORY_TAGS[service_type]} if service_type in OSM_CATEGORY_TAGS else OSM_CATEGORY_TAGS
-        osm_results = fetch_nearby_amenities_osm(lat, lng, tag_filters)
+    lookup path.
 
-    if osm_results:
-        source = "osm"
-        for r in osm_results:
+    Provider chain (each step only runs if the previous one came back
+    empty): Geoapify (if GEOAPIFY_API_KEY is configured — best coverage,
+    includes categories like ATMs that Overpass covers less reliably) ->
+    Overpass/OSM (free, keyless, always available) -> local mock
+    directory (guaranteed non-empty, so the feature never shows a hard
+    error, just possibly-stale demo data)."""
+    geoapify_key = app.config.get("GEOAPIFY_API_KEY", "")
+    geoapify_results = []
+    if geoapify_key and lat is not None and lng is not None:
+        types_to_try = [service_type] if service_type else list(geoapify_client.GEOAPIFY_CATEGORY_MAP.keys())
+        for t in types_to_try:
+            geoapify_results.extend(geoapify_client.nearby_places(lat, lng, t, geoapify_key))
+
+    if geoapify_results:
+        source = "geoapify"
+        for r in geoapify_results:
             r["distance_km"] = round(haversine_distance(lat, lng, r["lat"], r["lng"]), 2)
-        results = osm_results
+        results = geoapify_results
     else:
-        # OSM unreachable, rate-limited, or returned nothing — fall back to
-        # the full offline mock directory (police/hospital/pharmacy/
-        # helpline all included, already filtered by service_type), not
-        # just the pieces OSM doesn't cover.
-        source = "mock"
-        results = get_nearby_services(lat, lng, service_type=service_type)
+        osm_results = []
+        if lat is not None and lng is not None and (service_type is None or service_type in OSM_CATEGORY_TAGS):
+            tag_filters = {service_type: OSM_CATEGORY_TAGS[service_type]} if service_type in OSM_CATEGORY_TAGS else OSM_CATEGORY_TAGS
+            osm_results = fetch_nearby_amenities_osm(lat, lng, tag_filters)
+
+        if osm_results:
+            source = "osm"
+            for r in osm_results:
+                r["distance_km"] = round(haversine_distance(lat, lng, r["lat"], r["lng"]), 2)
+            results = osm_results
+        else:
+            # OSM unreachable, rate-limited, or returned nothing — fall back to
+            # the full offline mock directory (police/hospital/pharmacy/
+            # helpline all included, already filtered by service_type), not
+            # just the pieces OSM doesn't cover.
+            source = "mock"
+            results = get_nearby_services(lat, lng, service_type=service_type)
 
     # Helplines aren't a queryable OSM amenity tag, so if OSM *did* succeed
     # they still need to be folded in separately from the local directory.

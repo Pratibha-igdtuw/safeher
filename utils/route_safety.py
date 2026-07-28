@@ -137,6 +137,68 @@ def fetch_osrm_routes(origin_lat, origin_lng, dest_lat, dest_lng, alternatives=F
         return []
 
 
+def fetch_graphhopper_routes(origin_lat, origin_lng, dest_lat, dest_lng, api_key, alternatives=False):
+    """Real road-network routing via GraphHopper's routing API.
+
+    Returns the exact same shape as fetch_osrm_routes() — a list of
+    {distance_km, duration_min, geometry: [[lat, lng], ...]} dicts, most-
+    direct first — so callers (app.py's route_safety() view,
+    fetch_best_available_routes() below) don't need two code paths.
+    Returns [] if no API key is configured, or on any failure, exactly
+    like fetch_osrm_routes()."""
+    if requests is None or not api_key:
+        return []
+    try:
+        resp = requests.get(
+            "https://graphhopper.com/api/1/route",
+            params={
+                "point": [f"{origin_lat},{origin_lng}", f"{dest_lat},{dest_lng}"],
+                "vehicle": "foot",  # Safety Map routes are pedestrian journeys, not driving directions
+                "points_encoded": "false",
+                "algorithm": "alternative_route" if alternatives else "",
+                "alternative_route.max_paths": 2 if alternatives else 1,
+                "key": api_key,
+            },
+            timeout=OSRM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        paths = data.get("paths", [])
+        routes = []
+        for path in paths:
+            coords = (path.get("points") or {}).get("coordinates", [])  # [lng, lat] pairs
+            geometry = [[lat, lng] for lng, lat in coords]
+            if not geometry:
+                continue
+            routes.append({
+                "distance_km": round(path.get("distance", 0) / 1000, 2),
+                "duration_min": round(path.get("time", 0) / 60000, 1),  # GraphHopper gives ms
+                "geometry": geometry,
+            })
+        return routes
+    except Exception:
+        return []
+
+
+def fetch_best_available_routes(origin_lat, origin_lng, dest_lat, dest_lng, graphhopper_api_key=None, alternatives=False):
+    """Routing provider chain for the Safety Map's Journey Mode: try
+    GraphHopper first (if a key is configured — it's the newer,
+    better-maintained option), then fall back to the original free/
+    keyless OSRM public demo server. Callers get [] only if BOTH fail,
+    at which point app.py's existing straight-line-estimate fallback
+    kicks in unchanged.
+
+    This is purely additive — fetch_osrm_routes() itself is untouched
+    and still usable directly by anything that wants OSRM specifically.
+    """
+    if graphhopper_api_key:
+        routes = fetch_graphhopper_routes(origin_lat, origin_lng, dest_lat, dest_lng, graphhopper_api_key, alternatives=alternatives)
+        if routes:
+            return routes, "graphhopper"
+    routes = fetch_osrm_routes(origin_lat, origin_lng, dest_lat, dest_lng, alternatives=alternatives)
+    return routes, "osrm"
+
+
 def sample_route_points(geometry, num_samples=6):
     """Evenly-spaced sample points [[lat, lng], ...] along a route's
     geometry, used to check the corridor against risk-zone data without
