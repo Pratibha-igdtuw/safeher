@@ -255,16 +255,29 @@ function activateTab(btn) {
     // arrow keys move focus between the rest (standard tablist pattern).
     b.tabIndex = isActive ? 0 : -1;
   });
-  Object.values(tabPanels).forEach((p) => p.classList.add("hidden"));
+  // Hide ALL tab panels first, then show only the active one
+  Object.values(tabPanels).forEach((p) => {
+    p.classList.add("hidden");
+    p.style.display = "none"; // force hide via inline style too
+  });
   tabPanels[btn.dataset.tab].classList.remove("hidden");
+  tabPanels[btn.dataset.tab].style.display = ""; // reset so CSS takes over
 
+  // Hero section — only on home tab
   const heroEl = document.getElementById("tab-home-hero");
-  if (heroEl) heroEl.classList.toggle("hidden", btn.dataset.tab !== "home");
+  if (heroEl) {
+    const showHero = btn.dataset.tab === "home";
+    heroEl.classList.toggle("hidden", !showHero);
+    heroEl.style.display = showHero ? "" : "none";
+  }
 
-  // The Safety Hub has its own hero header; the global status strip
-  // (Safety Score / Journey / Guardian) is still shown on every other tab.
+  // Status strip (Safety Score / Journey / Guardian) — only on home tab
   const statusStripEl = document.getElementById("statusStrip");
-  if (statusStripEl) statusStripEl.classList.toggle("hidden", btn.dataset.tab === "directory");
+  if (statusStripEl) {
+    const showStrip = btn.dataset.tab === "home";
+    statusStripEl.classList.toggle("hidden", !showStrip);
+    statusStripEl.style.display = showStrip ? "" : "none";
+  }
 
   if (btn.dataset.tab === "map") {
     setTimeout(() => leafletMap && leafletMap.invalidateSize(), 50);
