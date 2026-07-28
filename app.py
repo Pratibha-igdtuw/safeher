@@ -131,6 +131,29 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 
+# --- Response compression (gzip) + static asset caching ---
+# gzip cuts text responses (HTML/CSS/JS) roughly 70-80% over the wire for
+# negligible CPU cost — main.js alone is ~130KB uncompressed, style.css
+# ~55KB, and every page render ships both. Optional import so the app
+# still runs if flask-compress isn't installed yet (see requirements.txt).
+try:
+    from flask_compress import Compress
+
+    Compress(app)
+except ImportError:  # pragma: no cover - only hit if flask-compress isn't installed
+    pass
+
+# Let browsers cache static files (css/js/vendor/media) between requests
+# instead of re-fetching them on every navigation. Filenames here aren't
+# content-hashed, so this is a conservative 1-day default rather than a
+# long-lived "immutable" cache — bump it once a cache-busting scheme
+# (e.g. serving as /static/<git-sha>/...) is in place.
+# NOTE: Flask's own Flask() constructor already seeds
+# SEND_FILE_MAX_AGE_DEFAULT = None into app.config before this line ever
+# runs, so `.setdefault(...)` here would be a silent no-op (the key
+# already "exists"). Must be a direct assignment to actually take effect.
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 86400
+
 # --- Rate limiting storage (in-memory by default; point RATELIMIT_STORAGE_URI
 #     at redis:// in production so limits are shared across workers) ---
 app.config["RATELIMIT_STORAGE_URI"] = os.environ.get("RATELIMIT_STORAGE_URI", "memory://")
@@ -163,9 +186,13 @@ try:
         strict_transport_security=IS_PRODUCTION,
         session_cookie_secure=IS_PRODUCTION,
         content_security_policy={
+            # Leaflet, Leaflet.heat, and Socket.IO are vendored into
+            # static/vendor/ (see templates/index.html and admin.html),
+            # so script-src/style-src no longer need to whitelist
+            # unpkg.com or cdn.socket.io.
             "default-src": "'self'",
-            "script-src": "'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com",
-            "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com",
+            "script-src": "'self' 'unsafe-inline'",
+            "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
             "font-src": "'self' https://fonts.gstatic.com",
             "img-src": "'self' data: https://*.tile.openstreetmap.org",
             "connect-src": "'self' ws: wss:",
@@ -180,8 +207,8 @@ except ImportError:  # pragma: no cover - only hit if flask-talisman isn't insta
         resp.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org; "
-            "script-src 'self' 'unsafe-inline' https://cdn.socket.io https://unpkg.com; "
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:",
         )
         return resp

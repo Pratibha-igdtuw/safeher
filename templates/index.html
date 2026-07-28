@@ -11,9 +11,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}" />
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-<!-- Performance note: external <script> tags for socket.io/leaflet/lucide
+<!-- Performance note: external <script> tags for socket.io/leaflet
      live at the end of <body> (just before main.js, which needs them),
      not here. A <script> in <head> without defer/async blocks HTML
      parsing until it loads — if a CDN is slow or unreachable that stalls
@@ -23,7 +23,18 @@
      entirely — it was never actually used anywhere in this codebase (the
      audio-distress pipeline computes its spectrogram with a small
      hand-rolled FFT in static/js/main.js, not tf.js), so it was pure
-     multi-hundred-KB dead weight on every single page load. -->
+     multi-hundred-KB dead weight on every single page load.
+
+     Leaflet and Socket.IO are now vendored into static/vendor/ instead
+     of pulled from unpkg.com/cdn.socket.io — self-hosting removes two
+     more third-party DNS+TLS+download round trips from every page load
+     (and removes the risk of the whole page stalling if either CDN is
+     slow/unreachable on a given network). Lucide was removed entirely:
+     it was loaded (589KB, unminified) but never once invoked anywhere
+     in this codebase — no data-lucide attributes, no createIcons() call
+     — the exact same dead-weight pattern as the old TensorFlow.js tag
+     above. All script tags below now use `defer` so they download in
+     parallel instead of serially blocking each other. -->
 </head>
 <body>
 
@@ -830,16 +841,15 @@
   <button type="button" class="sos-fab-item" data-fab-action="share" role="menuitem"><span aria-hidden="true">📍</span> Share Live Location</button>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.js"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}" defer></script>
 <!-- FEATURE 4: WebSocket for real-time notifications -->
 <script>window.CURRENT_USER_ID = "{{ current_user.id }}";</script>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<script src="{{ url_for('static', filename='js/main.js') }}"></script>
-<script src="{{ url_for('static', filename='js/safety-map.js') }}"></script>
-<script src="{{ url_for('static', filename='js/tilt.js') }}"></script>
-<script src="{{ url_for('static', filename='js/scroll-reveal.js') }}"></script>
-<script src="{{ url_for('static', filename='js/premium-enhancements.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/socketio/socket.io.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/main.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/safety-map.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/tilt.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/scroll-reveal.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/premium-enhancements.js') }}" defer></script>
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
