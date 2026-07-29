@@ -374,21 +374,34 @@
 
 <!-- ============================= MAP TAB ============================= -->
 <main id="tab-map" class="tab-panel hidden">
+<div class="map-page">
+
+  <!-- Search sits in normal page flow, right below the navbar — no longer -->
+  <!-- floating awkwardly over the map corner. -->
+  <div class="map-search-row">
+    <div class="map-search-bar">
+      <span class="map-search-icon" aria-hidden="true">🔍</span>
+      <input id="mapSearchInput" type="text" placeholder="Search address, landmark, college, metro, hospital…" autocomplete="off" aria-label="Search a location on the map" />
+      <button id="mapSearchClearBtn" class="map-search-clear hidden" type="button" aria-label="Clear search">✕</button>
+      <ul id="mapSearchSuggestions" class="map-search-suggestions hidden" role="listbox"></ul>
+      <div id="mapSearchHistory" class="map-search-history hidden"></div>
+    </div>
+  </div>
+
   <div class="map-layout">
 
     <div class="map-side card" id="mapInfoPanel">
       <h2>Safety Score Map</h2>
       <p class="muted" id="mapModeHint">Tap anywhere on the map to run a quick Safety Audit for that spot — pins are color-coded by score, just like SafetiPin's crowd-sourced audits. Press and hold to report an issue instead.</p>
 
-      <!-- Live status strip — Safety Score / Weather / Nearest services / Guardian & -->
-      <!-- Journey status / device signals. Populated by safety-map.js; every value -->
-      <!-- comes from a real source (device APIs, existing endpoints, or Open-Meteo) -->
+      <!-- Live status strip — Weather / Nearest services / device signals. -->
+      <!-- Safety Score, Guardian and Journey now live as floating glass chips -->
+      <!-- on top of the map itself (see #mapFloatingChips below) instead of -->
+      <!-- being duplicated here. Populated by safety-map.js; every value comes -->
+      <!-- from a real source (device APIs, existing endpoints, or Open-Meteo) -->
       <!-- except weather, which needs no key and is fetched client-side. -->
+      <h3 class="map-section-title" style="margin-top:0;">Area &amp; Device</h3>
       <div class="map-status-grid" id="mapStatusGrid" aria-live="polite">
-        <div class="map-status-cell">
-          <span class="map-status-label">Area Safety</span>
-          <span class="map-status-value" id="statSafetyScore">—</span>
-        </div>
         <div class="map-status-cell">
           <span class="map-status-label">Weather</span>
           <span class="map-status-value" id="statWeather">—</span>
@@ -400,14 +413,6 @@
         <div class="map-status-cell">
           <span class="map-status-label">Nearest Hospital</span>
           <span class="map-status-value" id="statNearestHospital">—</span>
-        </div>
-        <div class="map-status-cell">
-          <span class="map-status-label">Guardian</span>
-          <span class="map-status-value" id="statGuardian">—</span>
-        </div>
-        <div class="map-status-cell">
-          <span class="map-status-label">Journey</span>
-          <span class="map-status-value" id="statJourney">—</span>
         </div>
         <div class="map-status-cell">
           <span class="map-status-label">Battery</span>
@@ -492,12 +497,33 @@
     </div>
 
     <div class="map-wrap">
-      <div class="map-search-bar">
-        <span class="map-search-icon" aria-hidden="true">🔍</span>
-        <input id="mapSearchInput" type="text" placeholder="Search address, landmark, college, metro, hospital…" autocomplete="off" aria-label="Search a location on the map" />
-        <button id="mapSearchClearBtn" class="map-search-clear hidden" type="button" aria-label="Clear search">✕</button>
-        <ul id="mapSearchSuggestions" class="map-search-suggestions hidden" role="listbox"></ul>
-        <div id="mapSearchHistory" class="map-search-history hidden"></div>
+
+      <!-- Floating glass chips — Safety Score / Journey / Guardian at a -->
+      <!-- glance, hovering over the map instead of eating a full-width card -->
+      <!-- above it. Same element IDs as before, so safety-map.js keeps -->
+      <!-- updating them exactly as it did in the old sidebar grid. -->
+      <div class="map-floating-chips" id="mapFloatingChips" aria-live="polite">
+        <div class="map-chip" id="safetyScoreMapChip">
+          <span class="map-chip-icon" aria-hidden="true">🛡️</span>
+          <span class="map-chip-text">
+            <span class="map-chip-label">Safety Score</span>
+            <span class="map-chip-value" id="statSafetyScore">—</span>
+          </span>
+        </div>
+        <div class="map-chip" id="journeyStatusMapChip">
+          <span class="map-chip-icon" aria-hidden="true">🧭</span>
+          <span class="map-chip-text">
+            <span class="map-chip-label">Journey</span>
+            <span class="map-chip-value" id="statJourney">No active journey</span>
+          </span>
+        </div>
+        <div class="map-chip" id="guardianStatusMapChip">
+          <span class="map-chip-icon" aria-hidden="true">📡</span>
+          <span class="map-chip-text">
+            <span class="map-chip-label">Guardian</span>
+            <span class="map-chip-value" id="statGuardian">Not sharing</span>
+          </span>
+        </div>
       </div>
 
       <button id="mapMyLocationBtn" class="map-my-location-btn" type="button" aria-label="Center map on my current location" title="My Location">📍</button>
@@ -508,6 +534,7 @@
       <div id="mapJourneyCard" class="map-journey-card hidden"></div>
     </div>
   </div>
+</div>
 </main>
 
 <!-- QUICK MAP REPORT MODAL (long-press to report an issue) -->
