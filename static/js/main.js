@@ -1821,10 +1821,69 @@ function clearRoute() {
   routePoints = [];
   routeMarkers.forEach((m) => leafletMap.removeLayer(m));
   routeMarkers = [];
-  routeLines.forEach((l) => leafletMap.removeLayer(l));
-  routeLines = [];
+  clearRouteLines();
   routeResult.innerHTML = "";
   routeComparePanel.innerHTML = "";
+}
+
+function clearRouteLines() {
+  routeLines.forEach((l) => leafletMap.removeLayer(l));
+  routeLines = [];
+}
+
+// Fixed, high-contrast SafeHer-purple used for the recommended route line —
+// deliberately NOT scoreColor() (green/orange/red), since that palette is
+// exactly what already covers the map (risk zones, audit pins) and is why
+// the old orange route used to disappear into the background. Deep violet
+// stands apart from both the basemap and the safety-score colors.
+const ROUTE_LINE_COLOR = "#4C1D95";
+
+// Draws the single recommended route as two stacked polylines: a white
+// halo underneath (so the route stays legible over dark tiles, other
+// lines, or dense pins) and a bold violet line on top. Both use rounded
+// caps/joins for a smooth look, and weight is in screen pixels, so
+// visibility doesn't change with zoom level.
+function drawRouteLine(geometry) {
+  const halo = L.polyline(geometry, {
+    color: "#ffffff",
+    weight: 11,
+    opacity: 0.9,
+    lineCap: "round",
+    lineJoin: "round",
+  }).addTo(leafletMap);
+
+  const main = L.polyline(geometry, {
+    color: ROUTE_LINE_COLOR,
+    weight: 7,
+    opacity: 0.97,
+    lineCap: "round",
+    lineJoin: "round",
+    className: "route-line-main route-line-animated",
+  }).addTo(leafletMap);
+
+  routeLines.push(halo, main);
+  animateRouteDraw(main);
+}
+
+// Sweeps a stroke-dashoffset from the route's full length down to 0 so it
+// visibly "draws itself" onto the map. Skipped entirely for
+// prefers-reduced-motion, same accessibility stance as the existing
+// .route-line-animated handling in style.css.
+function animateRouteDraw(polyline) {
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const path = polyline.getElement && polyline.getElement();
+  if (!path || typeof path.getTotalLength !== "function") return;
+  try {
+    const length = path.getTotalLength();
+    path.style.transition = "none";
+    path.style.strokeDasharray = `${length}`;
+    path.style.strokeDashoffset = `${length}`;
+    path.getBoundingClientRect(); // force reflow so the transition below actually animates
+    path.style.transition = "stroke-dashoffset 900ms ease-out";
+    path.style.strokeDashoffset = "0";
+  } catch (err) {
+    // Non-fatal — worst case the route just appears without the draw-in.
+  }
 }
 
 // NOTE: the Risk-Zones and Nearby-Help layer *toggle buttons* used to live
@@ -1896,7 +1955,12 @@ async function compareRoutes() {
       origin: "Point A", destination: "Point B",
       origin_lat: a.lat, origin_lng: a.lng,
       destination_lat: b.lat, destination_lng: b.lng,
-      compare_alternatives: true,
+      // Only ever request the single best route. Showing several
+      // alternatives next to one Safety Score made it unclear which path
+      // the score was actually for — see fetch_best_available_routes() /
+      // fetch_osrm_routes() in utils/route_safety.py, where this flows
+      // straight through as OSRM/GraphHopper's own `alternatives: false`.
+      compare_alternatives: false,
     }),
   });
   if (!result._ok) {
@@ -1904,74 +1968,35 @@ async function compareRoutes() {
     return;
   }
 
-  routeLines.forEach((l) => leafletMap.removeLayer(l));
-  routeLines = [];
+  clearRouteLines();
 
+  // The backend already collapses to one route when compare_alternatives
+  // is false, but pick the highest-scoring entry defensively anyway — this
+  // guarantees the path drawn on the map and the score shown below can
+  // never end up referring to two different routes.
   const rawRoutes = result.routes || [];
-  routeResult.innerHTML = rawRoutes.length
-    ? `<strong>${rawRoutes.length > 1 ? "Route Comparison" : "Route Safety"}</strong><br/><span class="muted" style="font-size:11px;">${escapeHtml(result.note || "")}</span>`
-    : "No route data available.";
+  const route = rawRoutes.length ? rawRoutes.reduce((best, r) => (r.score > best.score ? r : best)) : null;
 
-  // Reclassify into Safest / Fastest / Balanced rather than the backend's
-  // generic "Fastest Route" / "Alternative Route" labels. With only 1 or 2
-  // routes actually returned by OSRM we show only that many cards, labeled
-  // honestly (never inventing a third route that doesn't exist).
-  const routes = classifyRoutesBySafetyProfile(rawRoutes);
-
-  const riskLevel = (score) => (score >= 75 ? "Low risk" : score >= 45 ? "Moderate risk" : "High risk");
-
-  routeComparePanel.innerHTML = routes
-    .map((r) => {
-      const color = scoreColor(r.score);
-      return `<div class="route-card" style="border-left:4px solid ${color};">
-        <strong>${r.profileIcon} ${escapeHtml(r.profileLabel)}</strong>
-        <p style="margin:4px 0; font-size:12px;" class="muted">
-          ${r.distance_km} km${r.duration_min != null ? " · " + Math.round(r.duration_min) + " min ETA" : ""}
-        </p>
-        <p style="margin:0;"><span style="color:${color}; font-weight:700;">${r.score}/100 — ${escapeHtml(r.rating)}</span></p>
-        <p style="margin:4px 0 0; font-size:11px;" class="muted">${riskLevel(r.score)} · ⚠️ ${r.risk_zones_crossed} risk zone(s) along this path</p>
-      </div>`;
-    })
-    .join("");
-
-  routes.forEach((r) => {
-    if (!r.geometry || r.geometry.length < 2) return;
-    const line = L.polyline(r.geometry, { color: scoreColor(r.score), weight: 4, opacity: 0.75, className: "route-line-animated" }).addTo(leafletMap);
-    routeLines.push(line);
-  });
-  if (routes.length) {
-    const bounds = L.latLngBounds(routes.flatMap((r) => r.geometry || []));
-    if (bounds.isValid()) leafletMap.flyToBounds(bounds, { padding: [30, 30], duration: 0.8 });
-  }
-}
-
-// Takes whatever routes OSRM actually returned (1-2, typically) and labels
-// them Safest / Fastest / Balanced based on their real scores and
-// durations — never fabricates a route that doesn't exist. With a single
-// route there's nothing to compare, so it's labeled "Recommended Route"
-// instead of arbitrarily picking one of the three names.
-function classifyRoutesBySafetyProfile(rawRoutes) {
-  if (!rawRoutes.length) return [];
-  if (rawRoutes.length === 1) {
-    return [{ ...rawRoutes[0], profileIcon: "🧭", profileLabel: "Recommended Route" }];
+  if (!route || !route.geometry || route.geometry.length < 2) {
+    routeResult.innerHTML = "No route data available.";
+    return;
   }
 
-  const bySafety = [...rawRoutes].sort((a, b) => b.score - a.score);
-  const byDuration = [...rawRoutes].sort((a, b) => (a.duration_min ?? Infinity) - (b.duration_min ?? Infinity));
-  const safest = bySafety[0];
-  const fastest = byDuration[0];
+  const color = scoreColor(route.score);
+  routeResult.innerHTML = `
+    <strong>🧭 Safest Recommended Route</strong>
+    <p style="margin:6px 0 4px; font-size:11px;" class="muted">${escapeHtml(result.note || "This is the one route used to calculate the Safety Score below.")}</p>
+    <p style="margin:4px 0; font-size:12px;" class="muted">
+      ${route.distance_km} km${route.duration_min != null ? " · " + Math.round(route.duration_min) + " min ETA" : ""}
+    </p>
+    <p style="margin:0;"><span style="color:${color}; font-weight:700;">${route.score}/100 — ${escapeHtml(route.rating)}</span></p>
+    <p style="margin:4px 0 0; font-size:11px;" class="muted">⚠️ ${route.risk_zones_crossed} risk zone(s) along this path</p>
+  `;
 
-  const labeled = [{ ...safest, profileIcon: "🟢", profileLabel: "Safest Route" }];
-  if (fastest !== safest) {
-    labeled.push({ ...fastest, profileIcon: "⚡", profileLabel: "Fastest Route" });
-  }
-  // A genuine third/"balanced" option only exists if there are more than 2
-  // distinct routes; with exactly 2 we're honest that it's a two-way choice.
-  const remaining = rawRoutes.filter((r) => r !== safest && r !== fastest);
-  if (remaining.length) {
-    labeled.push({ ...remaining[0], profileIcon: "⚖️", profileLabel: "Balanced Route" });
-  }
-  return labeled;
+  drawRouteLine(route.geometry);
+
+  const bounds = L.latLngBounds(route.geometry);
+  if (bounds.isValid()) leafletMap.flyToBounds(bounds, { padding: [30, 30], duration: 0.8 });
 }
 
 function initMap() {
